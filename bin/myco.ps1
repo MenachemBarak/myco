@@ -51,10 +51,14 @@ function myco {
     $previousCopilotHome = if ($hadCopilotHome) { $env:COPILOT_HOME } else { $null }
     $exitCode = 0
 
+    # Splatted, not wrapped in @(): the npm shim on PATH is copilot.ps1, and a
+    # single array argument would reach Copilot as one collapsed string.
+    $copilotArgs = @($plan.CopilotArgs)
+
     try {
         Set-Location -LiteralPath $plan.WorkDir
         $env:COPILOT_HOME = $plan.CopilotHome
-        & copilot @($plan.CopilotArgs)
+        & copilot @copilotArgs
         if ($null -ne $LASTEXITCODE) { $exitCode = [int]$LASTEXITCODE }
     } catch {
         Write-MycoError $_.Exception.Message
