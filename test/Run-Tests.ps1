@@ -90,7 +90,8 @@ function New-Sandbox {
     $mycoHome = Join-Path $root 'mycohome'
     $stubBin = Join-Path $root 'stubbin'
     $projects = Join-Path $root 'projects'
-    foreach ($d in @($root, $userProfile, $mycoHome, $stubBin, $projects)) {
+    $temp = Join-Path $root 'temp'
+    foreach ($d in @($root, $userProfile, $mycoHome, $stubBin, $projects, $temp)) {
         New-Item -ItemType Directory -Force -Path $d | Out-Null
     }
 
@@ -135,6 +136,7 @@ exit 0
         MycoHome    = $mycoHome
         StubBin     = $stubBin
         Projects    = $projects
+        Temp        = $temp
         Log         = $log
     }
 }
@@ -278,7 +280,7 @@ function Invoke-Myco {
     }
 
     $saved = @{}
-    foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'PATH', 'COPILOT_HOME') {
+    foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'PATH', 'COPILOT_HOME', 'TEMP', 'TMP') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
     }
     $previousErrorAction = $ErrorActionPreference
@@ -290,6 +292,8 @@ function Invoke-Myco {
         $env:USERPROFILE = $Sandbox.UserProfile
         $env:MYCO_TEST_LOG = $Sandbox.Log
         $env:COPILOT_HOME = ''
+        $env:TEMP = $Sandbox.Temp
+        $env:TMP = $Sandbox.Temp
         $env:PATH = $Sandbox.StubBin + ';' + $saved['PATH']
         & $runner
     } finally {
@@ -637,6 +641,35 @@ Describe 'cross-shell behaviour' {
         $call = Get-LastCopilotCall -Sandbox $sb
         Assert-Equal 3 $call.ArgList.Count 'a quoted prompt must stay one argument through cmd.exe'
         Assert-Equal 'do the thing' $call.ArgList[2] 'the prompt text must survive cmd.exe quoting'
+    }
+
+    It 'leaves no plan file behind after a normal cmd.exe run' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $left = @(Get-ChildItem -LiteralPath $sb.Temp -Filter 'myco-plan-*.cmd' -File -ErrorAction SilentlyContinue)
+        Assert-Equal 0 $left.Count 'the plan file must be removed once it has run'
+    }
+
+    It 'sweeps away stale plan files abandoned by an interrupted run' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $stale = Join-Path $sb.Temp 'myco-plan-000000000.cmd'
+        Set-Content -LiteralPath $stale -Value '@echo off' -Encoding ASCII
+        (Get-Item -LiteralPath $stale).LastWriteTime = (Get-Date).AddDays(-3)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd
+        Assert-True (-not (Test-Path -LiteralPath $stale)) `
+            'an abandoned plan file older than a day must be cleaned up'
+    }
+
+    It 'keeps plan files belonging to a concurrent run' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $fresh = Join-Path $sb.Temp 'myco-plan-111111111.cmd'
+        Set-Content -LiteralPath $fresh -Value '@echo off' -Encoding ASCII
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd
+        Assert-True (Test-Path -LiteralPath $fresh) `
+            'a plan file from another in-flight myco must not be deleted'
     }
 }
 
