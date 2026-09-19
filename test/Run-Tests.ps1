@@ -804,6 +804,21 @@ Describe 'usability' {
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('status')
         Assert-Match $r.Output '001' 'status must show the workspace id for the current folder'
     }
+
+    It 'status never invites adopting the global home copilot folder' {
+        $sb = New-Sandbox
+        New-Item -ItemType Directory -Force -Path (Join-Path $sb.UserProfile '.copilot') | Out-Null
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('status')
+        Assert-Match $r.Output '(?i)global' 'status must say this folder holds the global Copilot home'
+        Assert-NoMatch $r.Output '(?i)run "myco start"' 'status must not suggest a command that start refuses'
+    }
+
+    It 'status warns at a drive root instead of offering to create a workspace' {
+        $sb = New-Sandbox
+        $root = [System.IO.Path]::GetPathRoot($sb.Root)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $root -MycoArgs @('status')
+        Assert-NoMatch $r.Output '(?i)run "myco start"' 'status must not suggest creating a workspace at a drive root'
+    }
 }
 
 Describe 'repository hygiene' {
