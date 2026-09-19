@@ -413,10 +413,40 @@ Describe 'myco start' {
         Assert-Equal 'do the thing' $call.ArgList[2] 'the prompt text must survive intact'
     }
 
-    It 'refuses to shadow the global home copilot directory' {
+    It 'creates .copilot in the home folder too, when it is missing' {
         $sb = New-Sandbox
         $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start')
-        Assert-Match $r.Output '(?i)global' 'must explain that the home .copilot cannot be managed'
+        Assert-True (Test-Path -LiteralPath (Join-Path $sb.UserProfile '.copilot')) `
+            "myco start must create .copilot wherever it is run. Output:`n$($r.Output)"
+        Assert-Equal '0' $r.ExitCode 'starting in the home folder is not an error'
+    }
+
+    It 'adopts an existing home .copilot rather than refusing it' {
+        $sb = New-Sandbox
+        $globalHome = Join-Path $sb.UserProfile '.copilot'
+        New-Item -ItemType Directory -Force -Path $globalHome | Out-Null
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start')
+        Assert-Equal '0' $r.ExitCode 'the home folder must be usable'
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal $globalHome $call.Home 'COPILOT_HOME must point at the home .copilot'
+        $list = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('sessions')
+        Assert-Match $list.Output '\[001\]' 'the home folder must be registered like any other'
+    }
+
+    It 'never seeds a new .copilot from itself' {
+        $sb = New-Sandbox
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start')
+        Assert-Equal '0' $r.ExitCode 'creating the home .copilot must not error'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $sb.UserProfile '.copilot\.copilot'))) `
+            'seeding must never copy a folder into itself'
+        Assert-NoMatch $r.Output '(?i)could not seed' 'self-seeding must be skipped, not attempted'
+    }
+
+    It 'still refuses to create a workspace at a drive root' {
+        $sb = New-Sandbox
+        $root = [System.IO.Path]::GetPathRoot($sb.Root)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $root -MycoArgs @('start')
+        Assert-Match $r.Output '(?i)drive root' 'must explain why a drive root is refused'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit with a non-zero status'
     }
 
@@ -805,12 +835,12 @@ Describe 'usability' {
         Assert-Match $r.Output '001' 'status must show the workspace id for the current folder'
     }
 
-    It 'status never invites adopting the global home copilot folder' {
+    It 'status marks the home folder as holding the global Copilot home' {
         $sb = New-Sandbox
         New-Item -ItemType Directory -Force -Path (Join-Path $sb.UserProfile '.copilot') | Out-Null
         $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('status')
-        Assert-Match $r.Output '(?i)global' 'status must say this folder holds the global Copilot home'
-        Assert-NoMatch $r.Output '(?i)run "myco start"' 'status must not suggest a command that start refuses'
+        Assert-Match $r.Output '(?i)global' 'status must point out that this is the global Copilot home'
+        Assert-Match $r.Output '(?i)myco start' 'status must still offer to register the folder'
     }
 
     It 'status warns at a drive root instead of offering to create a workspace' {
