@@ -416,6 +416,9 @@ function Initialize-MycoWorkspaceSeed {
     if ($Mode -eq 'none') { return }
     $source = Get-MycoGlobalCopilotHome
     if (-not (Test-Path -LiteralPath $source -PathType Container)) { return }
+    # Running in the home folder makes the source and the destination the same
+    # directory; there is nothing to seed from.
+    if ((ConvertTo-MycoComparablePath $source) -eq (ConvertTo-MycoComparablePath $CopilotHome)) { return }
 
     foreach ($file in @('settings.json', 'mcp-config.json')) {
         $from = Join-Path $source $file
@@ -547,16 +550,20 @@ function Show-MycoHelp {
 }
 
 function Assert-MycoManageableFolder {
-    <#  Returns an error string when the folder must not be managed. #>
+    <#  Returns an error string when the folder must not be managed. The home
+        folder is fine: its .copilot is Copilot's default home, so pointing
+        COPILOT_HOME at it simply reproduces normal behaviour. #>
     param([string]$Directory)
-    $copilotHome = Join-Path $Directory '.copilot'
-    if ((ConvertTo-MycoComparablePath $copilotHome) -eq (ConvertTo-MycoComparablePath (Get-MycoGlobalCopilotHome))) {
-        return 'this folder owns your global Copilot home; myco only manages project folders. cd into a project first.'
-    }
     if (Test-MycoDriveRoot $Directory) {
         return 'refusing to create a workspace at a drive root. cd into a project folder first.'
     }
     return ''
+}
+
+function Test-MycoGlobalCopilotFolder {
+    param([string]$Directory)
+    $copilotHome = Join-Path $Directory '.copilot'
+    return ((ConvertTo-MycoComparablePath $copilotHome) -eq (ConvertTo-MycoComparablePath (Get-MycoGlobalCopilotHome)))
 }
 
 function Invoke-MycoLaunch {
@@ -743,6 +750,10 @@ function Show-MycoStatus {
         Write-MycoLine '  workspace    not registered yet - run "myco start" here to adopt it'
     } else {
         Write-MycoLine '  workspace    none - run "myco start" here to create one'
+    }
+
+    if (Test-MycoGlobalCopilotFolder -Directory $Directory) {
+        Write-MycoLine '  note         this folder holds your global Copilot home' 'DarkYellow'
     }
 
     if (Test-Path -LiteralPath $copilotHome -PathType Container) {

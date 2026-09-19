@@ -143,9 +143,11 @@ seeded.
 
 ## Safety
 
-- Refuses to manage your home folder, because `~\.copilot` is Copilot's global
-  home rather than a project.
+- Your home folder works like any other folder. Because `~\.copilot` is
+  Copilot's default home, registering it simply reproduces normal Copilot
+  behaviour; `myco status` points out when you are standing in it.
 - Refuses to create a workspace at a drive root.
+- A folder is never seeded from itself.
 - `COPILOT_HOME` is restored after every session, in both shells.
 - The registry is written atomically under a named mutex, so PowerShell and
   `cmd.exe` can be used at the same time.
