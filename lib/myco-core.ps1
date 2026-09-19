@@ -734,12 +734,15 @@ function Show-MycoStatus {
     Write-MycoLine ''
     Write-MycoLine ('  folder       ' + $Directory)
 
+    $problem = Assert-MycoManageableFolder -Directory $Directory
     if ($workspace) {
         Write-MycoLine ('  workspace    [' + $workspace.id + ']  (' + $workspace.origin + ')') 'White'
+    } elseif ($problem) {
+        Write-MycoLine ('  workspace    not available here - ' + $problem) 'DarkYellow'
     } elseif (Test-Path -LiteralPath $copilotHome -PathType Container) {
-        Write-MycoLine '  workspace    not registered yet - run "myco start" to adopt it'
+        Write-MycoLine '  workspace    not registered yet - run "myco start" here to adopt it'
     } else {
-        Write-MycoLine '  workspace    none - run "myco start" to create one'
+        Write-MycoLine '  workspace    none - run "myco start" here to create one'
     }
 
     if (Test-Path -LiteralPath $copilotHome -PathType Container) {
