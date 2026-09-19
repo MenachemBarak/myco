@@ -1,0 +1,7 @@
+# myco keeps its state outside the repository; these are only ever local noise.
+*.log
+*.tmp
+registry.json
+registry.json.corrupt-*
+config.json
+.copilot/

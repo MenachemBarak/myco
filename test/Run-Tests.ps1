@@ -15,10 +15,13 @@
 [CmdletBinding()]
 param(
     [string]$Filter = '*',
+    [ValidateSet('powershell.exe', 'pwsh.exe')][string]$PsExe = 'powershell.exe',
     [switch]$KeepSandbox
 )
 
 $ErrorActionPreference = 'Stop'
+
+$script:DefaultPsExe = $PsExe
 
 $script:RepoRoot = Split-Path -Parent $PSScriptRoot
 $script:MycoPs1 = Join-Path $script:RepoRoot 'bin\myco.ps1'
@@ -218,12 +221,12 @@ function Invoke-Myco {
             ('call "' + $script:MycoCmd + '" ' + $quoted),
             'echo MYCO_EXIT=%ERRORLEVEL%',
             'echo FINALCWD=%CD%',
-            'echo LEAK=%COPILOT_HOME%'
+            'if defined COPILOT_HOME (echo LEAK=%COPILOT_HOME%) else (echo LEAK=)'
         )
         Set-Content -LiteralPath $driver -Value ($lines -join "`r`n") -Encoding ASCII
         $runner = { & cmd.exe /c $driver 2>&1 | Out-File -LiteralPath $outFile -Encoding UTF8 }
     } else {
-        $psExe = if ($Shell -eq 'pwsh7') { 'pwsh.exe' } else { 'powershell.exe' }
+        $psExe = if ($Shell -eq 'pwsh7') { 'pwsh.exe' } else { $script:DefaultPsExe }
         $driver = Join-Path $Sandbox.Root ("drv-$id.ps1")
         $argList = if ($MycoArgs.Count -gt 0) {
             ($MycoArgs | ForEach-Object { ConvertTo-PsLiteral $_ }) -join ','
@@ -250,7 +253,11 @@ function Invoke-Myco {
     foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'PATH', 'COPILOT_HOME') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
     }
+    $previousErrorAction = $ErrorActionPreference
     try {
+        # myco reports problems on stderr; with 'Stop' those lines would be
+        # rethrown here instead of being captured for assertions.
+        $ErrorActionPreference = 'Continue'
         $env:MYCO_HOME = $Sandbox.MycoHome
         $env:USERPROFILE = $Sandbox.UserProfile
         $env:MYCO_TEST_LOG = $Sandbox.Log
@@ -258,6 +265,7 @@ function Invoke-Myco {
         $env:PATH = $Sandbox.StubBin + ';' + $saved['PATH']
         & $runner
     } finally {
+        $ErrorActionPreference = $previousErrorAction
         foreach ($k in @($saved.Keys)) {
             [Environment]::SetEnvironmentVariable($k, $saved[$k])
         }
