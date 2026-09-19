@@ -96,16 +96,38 @@ function New-Sandbox {
 
     $log = Join-Path $root 'copilot-calls.log'
 
-    # Recording stub that impersonates the copilot CLI.
+    # Recording stub that impersonates the copilot CLI. Arguments are recorded
+    # one per line as well as verbatim, so an entry point that collapses them
+    # into a single argument is detectable.
     $stub = @'
 @echo off
 >>"%MYCO_TEST_LOG%" echo [call]
 >>"%MYCO_TEST_LOG%" echo cwd=%CD%
 >>"%MYCO_TEST_LOG%" echo home=%COPILOT_HOME%
 >>"%MYCO_TEST_LOG%" echo args=%*
+:myco_stub_loop
+if "%~1"=="" goto :myco_stub_done
+>>"%MYCO_TEST_LOG%" echo arg=%~1
+shift
+goto :myco_stub_loop
+:myco_stub_done
 exit /b 0
 '@
     Set-Content -LiteralPath (Join-Path $stubBin 'copilot.cmd') -Value $stub -Encoding ASCII
+
+    # npm installs both copilot.cmd and copilot.ps1, and PowerShell resolves the
+    # .ps1 shim in preference to the .cmd one. The suite mirrors that, because
+    # argument handling differs sharply between the two.
+    $stubPs1 = @'
+$log = $env:MYCO_TEST_LOG
+Add-Content -LiteralPath $log -Value '[call]'
+Add-Content -LiteralPath $log -Value ('cwd=' + (Get-Location).Path)
+Add-Content -LiteralPath $log -Value ('home=' + [string]$env:COPILOT_HOME)
+Add-Content -LiteralPath $log -Value ('args=' + ($args -join ' '))
+foreach ($a in $args) { Add-Content -LiteralPath $log -Value ('arg=' + [string]$a) }
+exit 0
+'@
+    Set-Content -LiteralPath (Join-Path $stubBin 'copilot.ps1') -Value $stubPs1 -Encoding UTF8
 
     [pscustomobject]@{
         Root        = $root
@@ -165,12 +187,18 @@ function Get-CopilotCalls {
     foreach ($line in (Get-Content -LiteralPath $Sandbox.Log)) {
         switch -Regex ($line) {
             '^\[call\]$' {
-                $current = [pscustomobject]@{ Cwd = ''; Home = ''; CliArgs = '' }
+                $current = [pscustomobject]@{
+                    Cwd     = ''
+                    Home    = ''
+                    CliArgs = ''
+                    ArgList = (New-Object System.Collections.ArrayList)
+                }
                 [void]$calls.Add($current)
             }
             '^cwd=(.*)$' { if ($current) { $current.Cwd = $Matches[1].Trim() } }
             '^home=(.*)$' { if ($current) { $current.Home = $Matches[1].Trim() } }
             '^args=(.*)$' { if ($current) { $current.CliArgs = $Matches[1].Trim() } }
+            '^arg=(.*)$' { if ($current) { [void]$current.ArgList.Add($Matches[1].Trim()) } }
         }
     }
     return $calls.ToArray()
@@ -358,6 +386,27 @@ Describe 'myco start' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4')
         $call = Get-LastCopilotCall -Sandbox $sb
         Assert-Match $call.CliArgs '--model gpt-5\.4' 'extra arguments must be forwarded to copilot'
+    }
+
+    It 'passes every argument to copilot separately, never as one string' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal 3 $call.ArgList.Count `
+            ("copilot must receive three separate arguments, got: " + (($call.ArgList | ForEach-Object { "<$_>" }) -join ' '))
+        Assert-Equal '--yolo' $call.ArgList[0] 'first argument must be --yolo'
+        Assert-Equal '--model' $call.ArgList[1] 'second argument must be --model'
+        Assert-Equal 'gpt-5.4' $call.ArgList[2] 'third argument must be the model name'
+    }
+
+    It 'keeps an argument containing spaces as a single argument' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '-p', 'do the thing')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal 3 $call.ArgList.Count 'a quoted prompt must stay one argument'
+        Assert-Equal 'do the thing' $call.ArgList[2] 'the prompt text must survive intact'
     }
 
     It 'refuses to shadow the global home copilot directory' {
@@ -569,6 +618,25 @@ Describe 'cross-shell behaviour' {
         $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions') -Shell cmd
         Assert-Match $r.Output '\[001\]' 'workspace registered from cmd must be listed'
         Assert-Match $r.Output '\[002\]' 'workspace registered from PowerShell must be listed'
+    }
+
+    It 'passes arguments separately from cmd.exe too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4') -Shell cmd
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal 3 $call.ArgList.Count `
+            ("copilot must receive three separate arguments, got: " + (($call.ArgList | ForEach-Object { "<$_>" }) -join ' '))
+        Assert-Equal 'gpt-5.4' $call.ArgList[2] 'the model name must survive cmd.exe quoting'
+    }
+
+    It 'keeps a spaced argument intact from cmd.exe' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '-p', 'do the thing') -Shell cmd
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal 3 $call.ArgList.Count 'a quoted prompt must stay one argument through cmd.exe'
+        Assert-Equal 'do the thing' $call.ArgList[2] 'the prompt text must survive cmd.exe quoting'
     }
 }
 
