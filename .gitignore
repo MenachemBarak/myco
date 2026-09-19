@@ -1,7 +1,8 @@
-# myco keeps its state outside the repository; these are only ever local noise.
+# myco keeps its state in %APPDATA%\.myco, never in the repository. These are
+# only here so a stray local run cannot commit machine state by accident.
+/registry.json
+/registry.json.corrupt-*
+/config.json
+.copilot/
 *.log
 *.tmp
-registry.json
-registry.json.corrupt-*
-config.json
-.copilot/
