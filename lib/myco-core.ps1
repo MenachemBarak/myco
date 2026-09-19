@@ -16,7 +16,7 @@
 
 Set-StrictMode -Off
 
-function Get-MycoVersion { '1.0.0' }
+function Get-MycoVersion { '1.0.1' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
