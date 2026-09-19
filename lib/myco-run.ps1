@@ -18,6 +18,8 @@ param(
 
 . (Join-Path $PSScriptRoot 'myco-core.ps1')
 
+Remove-MycoStalePlanFiles
+
 $argv = @()
 $count = 0
 if ($env:MYCO_ARGC) { [void][int]::TryParse($env:MYCO_ARGC, [ref]$count) }

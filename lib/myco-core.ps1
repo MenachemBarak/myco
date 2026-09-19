@@ -476,6 +476,23 @@ function Get-MycoOemEncoding {
     return [System.Text.Encoding]::ASCII
 }
 
+function Remove-MycoStalePlanFiles {
+    <#  A cmd.exe run interrupted mid-plan never reaches its own cleanup, so the
+        fragment would linger in TEMP. Sweep anything clearly abandoned, while
+        leaving fresh files alone in case another myco is mid-flight. #>
+    param([int]$OlderThanHours = 24)
+    $temp = $env:TEMP
+    if (-not $temp -or -not (Test-Path -LiteralPath $temp -PathType Container)) { return }
+    $cutoff = [DateTime]::UtcNow.AddHours(-[Math]::Abs($OlderThanHours))
+    try {
+        $stale = @(Get-ChildItem -LiteralPath $temp -Filter 'myco-plan-*.cmd' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTimeUtc -lt $cutoff })
+        foreach ($file in $stale) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
+}
+
 function Write-MycoCmdPlan {
     <#  Emits a batch fragment the calling cmd.exe session runs in-process, so
         the directory change outlives myco. #>
