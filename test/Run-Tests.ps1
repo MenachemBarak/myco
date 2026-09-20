@@ -330,6 +330,27 @@ function Resolve-ShellExe {
     return $Name
 }
 
+function Get-CopilotConfig {
+    <#  Copilot's config.json carries a // comment header, so a plain
+        ConvertFrom-Json would choke on it. #>
+    param([string]$CopilotHome)
+    $path = Join-Path $CopilotHome 'config.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    $raw = Get-Content -LiteralPath $path -Raw
+    $body = ($raw -split "`r?`n" | Where-Object { $_ -notmatch '^\s*//' }) -join "`n"
+    if (-not $body.Trim()) { return $null }
+    return ($body | ConvertFrom-Json)
+}
+
+function Get-TrustedFolders {
+    param([string]$CopilotHome)
+    $cfg = Get-CopilotConfig -CopilotHome $CopilotHome
+    if (-not $cfg) { return @() }
+    $names = @($cfg.PSObject.Properties.Name)
+    if ($names -notcontains 'trustedFolders') { return @() }
+    return @($cfg.trustedFolders)
+}
+
 function Invoke-Myco {
     <#  Runs myco the way a real user would: as a dot-sourced PowerShell
         function, or as myco.cmd called from a batch script. Reports the
@@ -1340,6 +1361,114 @@ Describe 'seeding and configuration' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $proj '.copilot\settings.json'))) `
             'seed=none must leave the new workspace empty'
+    }
+}
+
+Describe 'trusted folders' {
+
+    It 'trusts the workspace folder when it creates a .copilot' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $trusted = @(Get-TrustedFolders -CopilotHome (Join-Path $proj '.copilot'))
+        Assert-True ($trusted -contains $proj) `
+            ('the workspace must be trusted, found: ' + ($trusted -join ' | '))
+    }
+
+    It 'trusts an adopted workspace folder too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        New-Item -ItemType Directory -Force -Path (Join-Path $proj '.copilot') | Out-Null
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $trusted = @(Get-TrustedFolders -CopilotHome (Join-Path $proj '.copilot'))
+        Assert-True ($trusted -contains $proj) 'an adopted workspace must be trusted as well'
+    }
+
+    It 'adds the trust entry only once' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $trusted = @(Get-TrustedFolders -CopilotHome (Join-Path $proj '.copilot'))
+        Assert-Equal 1 @($trusted | Where-Object { $_ -eq $proj }).Count 'the entry must not accumulate'
+    }
+
+    It 'keeps folders the config already trusted' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $ch = Join-Path $proj '.copilot'
+        New-Item -ItemType Directory -Force -Path $ch | Out-Null
+        Set-Content -LiteralPath (Join-Path $ch 'config.json') -Encoding UTF8 -Value @'
+// User settings belong in settings.json.
+// This file is managed automatically.
+{
+  "appTipShown": true,
+  "trustedFolders": [
+    "D:\\somewhere\\else"
+  ]
+}
+'@
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $trusted = @(Get-TrustedFolders -CopilotHome $ch)
+        Assert-True ($trusted -contains 'D:\somewhere\else') 'an existing trusted folder must survive'
+        Assert-True ($trusted -contains $proj) 'the workspace must be added alongside it'
+    }
+
+    It 'preserves the rest of the config and its comment header' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $ch = Join-Path $proj '.copilot'
+        New-Item -ItemType Directory -Force -Path $ch | Out-Null
+        $cfgPath = Join-Path $ch 'config.json'
+        Set-Content -LiteralPath $cfgPath -Encoding UTF8 -Value @'
+// User settings belong in settings.json.
+// This file is managed automatically.
+{
+  "firstLaunchAt": "2026-03-11T00:00:00.000Z",
+  "appTipShown": true,
+  "askedSetupTerminals": [
+    "windows-terminal"
+  ]
+}
+'@
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $raw = Get-Content -LiteralPath $cfgPath -Raw
+        Assert-Match $raw '(?m)^//' 'the comment header must be kept'
+        $cfg = Get-CopilotConfig -CopilotHome $ch
+        Assert-Equal '2026-03-11T00:00:00.000Z' ([string]$cfg.firstLaunchAt) 'other keys must survive untouched'
+        Assert-True (@($cfg.askedSetupTerminals) -contains 'windows-terminal') 'arrays must survive as arrays'
+    }
+
+    It 'writes trustedFolders as a json array even with one entry' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $raw = Get-Content -LiteralPath (Join-Path $proj '.copilot\config.json') -Raw
+        Assert-Match $raw '"trustedFolders"\s*:\s*\[' 'a single entry must still be a json array'
+    }
+
+    It 'trusts the folder when a session is resumed as well' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $target = New-FakeSession -CopilotHome $ch -Name 'Some work' -UpdatedAt (Get-Date)
+        # A tab opened by recover resumes by uuid, so that path must trust too.
+        Remove-Item -LiteralPath (Join-Path $ch 'config.json') -Force -ErrorAction SilentlyContinue
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('resume', $target)
+        $trusted = @(Get-TrustedFolders -CopilotHome $ch)
+        Assert-True ($trusted -contains $proj) 'resuming must trust the workspace too'
+    }
+
+    It 'never touches the global copilot home of another folder' {
+        $sb = New-Sandbox
+        $globalHome = Join-Path $sb.UserProfile '.copilot'
+        New-Item -ItemType Directory -Force -Path $globalHome | Out-Null
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $globalHome 'config.json'))) `
+            'trusting a project must not write into the global copilot home'
     }
 }
 
