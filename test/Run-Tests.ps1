@@ -1007,7 +1007,7 @@ Describe 'myco recover' {
         Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'nothing may be launched'
     }
 
-    It 'skips sessions that are already running' {
+    It 'never reopens a session whose process is already running' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
@@ -1017,11 +1017,41 @@ Describe 'myco recover' {
             -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
         $null = New-FakeSession -CopilotHome $ch -Name 'Needs recovery' -UpdatedAt (Get-Date).AddMinutes(-6)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
-        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) 'a session with a live process does not need recovering'
+        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) 'a session with a live process must never be reopened'
         Assert-NoMatch ((Get-WtArgs -Sandbox $sb) -join ' ') 'Still running' 'the live session must be skipped'
     }
 
-    It 'includes running sessions with --all' {
+    It 'says how many sessions it left running' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        foreach ($n in @('Live one', 'Live two')) {
+            $live = Start-TestProcess
+            $null = New-FakeSession -CopilotHome $ch -Name $n -UpdatedAt (Get-Date).AddMinutes(-5) `
+                -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
+        }
+        $null = New-FakeSession -CopilotHome $ch -Name 'Needs recovery' -UpdatedAt (Get-Date).AddMinutes(-6)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
+        Assert-Match $r.Output '(?i)2 .*(still running|already running)' `
+            'the count of skipped running sessions must be stated, not left a mystery'
+    }
+
+    It 'explains the skip even when everything is still running' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $live = Start-TestProcess
+        $null = New-FakeSession -CopilotHome $ch -Name 'Live one' -UpdatedAt (Get-Date).AddMinutes(-5) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-Match $r.Output '(?i)(still running|already running)' 'must say why there is nothing to do'
+        Assert-Equal '0' $r.ExitCode 'having nothing to recover is not an error'
+        Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'nothing may be launched'
+    }
+
+    It 'no longer offers a way to reopen running sessions' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
@@ -1029,9 +1059,10 @@ Describe 'myco recover' {
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Still running' -UpdatedAt (Get-Date).AddMinutes(-5) `
             -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
-        $null = New-FakeSession -CopilotHome $ch -Name 'Needs recovery' -UpdatedAt (Get-Date).AddMinutes(-6)
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--all')
-        Assert-Equal 2 (Get-WtTabCount -Sandbox $sb) '--all must reopen running sessions too'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--all')
+        Assert-Match $r.Output '(?i)--all' 'must name the option it no longer accepts'
+        Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
+        Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'a removed option must never reopen a live session'
     }
 
     It 'spans every workspace, not just the current folder' {
