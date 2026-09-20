@@ -8,19 +8,27 @@ directory, keeps a numbered registry of those folders, and lets you jump back
 into any recent session with a short id.
 
 ```text
-myco workspaces (2)
+  myco · 2 workspaces · 1 active
 
-[001] checkout-service   (created)
-      D:\work\checkout-service
-      001001 *  2026-09-19 14:02  Fix the redirect loop after login
-      001002    2026-09-18 09:11  Split the billing module
-      001003    2026-09-17 16:40  Add contract tests
+┌─ [001] checkout-service (created) ───────────────────────────────────────────┐
+│ D:\work\checkout-service                                                     │
+├──────────┬──────────┬──────────────┬─────────────────────────────────────────┤
+│ ID       │ STATUS   │ WHEN         │ SESSION                                 │
+├──────────┼──────────┼──────────────┼─────────────────────────────────────────┤
+│ 001001   │ ● active │ 3 min ago    │ Fix the redirect loop after login       │
+│ 001002   │          │ 5 hours ago  │ Split the billing module                │
+│ 001003   │          │ 2 days ago   │ Add contract tests                      │
+└──────────┴──────────┴──────────────┴─────────────────────────────────────────┘
 
-[002] design-system   (adopted)
-      D:\work\design-system
-      002001    2026-09-15 11:20  Token naming pass
+┌─ [002] design-system (adopted) ──────────────────────────────────────────────┐
+│ D:\work\design-system                                                        │
+├──────────┬──────────┬──────────────┬─────────────────────────────────────────┤
+│ ID       │ STATUS   │ WHEN         │ SESSION                                 │
+├──────────┼──────────┼──────────────┼─────────────────────────────────────────┤
+│ 002001   │          │ 2026-09-15   │ Token naming pass                       │
+└──────────┴──────────┴──────────────┴─────────────────────────────────────────┘
 
-* = session currently in use.  Resume with: myco resume <id>
+  ● active = a Copilot process is running.  Resume with: myco resume <id>
 ```
 
 ```console
@@ -29,6 +37,21 @@ myco workspaces (2)
 
 …moves your shell into `D:\work\checkout-service` and reopens that exact
 session.
+
+The table adapts to your terminal width, and degrades one character at a time
+on a legacy code page: `cmd.exe` on code page 437 keeps the borders but shows
+`*` instead of `●`, because that code page has box drawing and no filled
+circle. Piping the output is safe.
+
+## What "active" means
+
+A session is reported as active only when a Copilot process is genuinely still
+running. Copilot marks a live session with an `inuse.<pid>.lock` file, but
+those files survive a crash or a hard kill, and Windows hands the same process
+id out again later. So myco treats a lock as proof of life only when the
+process still exists **and** started no later than the lock was written — the
+process that wrote the lock must have been alive at that moment, so anything
+that started afterwards is an unrelated program that inherited the id.
 
 ## How it works
 
@@ -76,7 +99,7 @@ never touched.
 | --- | --- |
 | `myco start [copilot args]` | Creates `.\.copilot` if missing, registers the folder, runs `copilot --yolo`. |
 | `myco continue [copilot args]` | Same, but runs `copilot --yolo --continue`. |
-| `myco sessions` | Lists every registered folder with its id and last 15 sessions. Aliases: `ls`, `list`. |
+| `myco sessions` | Lists every registered folder as a table, with its id, the last 15 sessions and which are running. Aliases: `ls`, `list`. |
 | `myco resume <id>` | Moves your shell into the folder and resumes. |
 | `myco status` | Describes the current folder. |
 | `myco config [key] [value]` | Shows or changes `seed` and `maxSessions`. |

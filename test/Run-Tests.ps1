@@ -281,23 +281,29 @@ function Invoke-Myco {
 
     $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $outFile = Join-Path $Sandbox.Root ("out-$id.txt")
+    $decodeCodePage = 0
 
     if ($Shell -eq 'cmd') {
         $driver = Join-Path $Sandbox.Root ("drv-$id.cmd")
         $quoted = ($MycoArgs | ForEach-Object {
                 if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '""') + '"' } else { $_ }
             }) -join ' '
-        $lines = @('@echo off')
-        if ($CodePage -gt 0) { $lines += ('chcp ' + $CodePage + ' >nul') }
-        $lines += @(
+        # cmd writes its own output so the bytes reach the file exactly as the
+        # console encoding produced them; letting PowerShell pipe it would
+        # re-encode and hide any character the code page cannot represent.
+        $decodeCodePage = $CodePage
+        if ($decodeCodePage -le 0) { $decodeCodePage = 65001 }
+        $lines = @(
+            '@echo off',
+            ('chcp ' + $decodeCodePage + ' >nul'),
             ('cd /d "' + $WorkDir + '"'),
-            ('call "' + $script:MycoCmd + '" ' + $quoted),
-            'echo MYCO_EXIT=%ERRORLEVEL%',
-            'echo FINALCWD=%CD%',
-            'if defined COPILOT_HOME (echo LEAK=%COPILOT_HOME%) else (echo LEAK=)'
+            ('call "' + $script:MycoCmd + '" ' + $quoted + ' >>"' + $outFile + '" 2>&1'),
+            ('echo MYCO_EXIT=%ERRORLEVEL%>>"' + $outFile + '"'),
+            ('echo FINALCWD=%CD%>>"' + $outFile + '"'),
+            ('if defined COPILOT_HOME (echo LEAK=%COPILOT_HOME%>>"' + $outFile + '") else (echo LEAK=>>"' + $outFile + '")')
         )
         Set-Content -LiteralPath $driver -Value ($lines -join "`r`n") -Encoding ASCII
-        $runner = { & cmd.exe /c $driver 2>&1 | Out-File -LiteralPath $outFile -Encoding UTF8 }
+        $runner = { & cmd.exe /c $driver | Out-Null }
     } else {
         $psExe = if ($Shell -eq 'pwsh7') { 'pwsh.exe' } else { $script:DefaultPsExe }
         $driver = Join-Path $Sandbox.Root ("drv-$id.ps1")
@@ -346,7 +352,17 @@ function Invoke-Myco {
         }
     }
 
-    $text = if (Test-Path -LiteralPath $outFile) { Get-Content -LiteralPath $outFile -Raw } else { '' }
+    $text = ''
+    if (Test-Path -LiteralPath $outFile) {
+        if ($decodeCodePage -gt 0) {
+            # Decoded with the very code page the console used, so a character
+            # the console could not represent shows up as a replacement here.
+            $bytes = [System.IO.File]::ReadAllBytes($outFile)
+            $text = [System.Text.Encoding]::GetEncoding($decodeCodePage).GetString($bytes)
+        } else {
+            $text = Get-Content -LiteralPath $outFile -Raw
+        }
+    }
     if ($null -eq $text) { $text = '' }
 
     $finalCwd = if ($text -match 'FINALCWD=(.*)') { $Matches[1].Trim() } else { '' }
@@ -708,19 +724,30 @@ Describe 'myco sessions presentation' {
         Assert-Match $r.Output '001001' 'the table must still render'
     }
 
-    It 'falls back to plain ascii on a legacy code page' {
+    It 'emits nothing a legacy code page cannot render' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $ch = Join-Path $proj '.copilot'
+        $live = Start-TestProcess
+        $null = New-FakeSession -CopilotHome $ch -Name 'Legacy shell' -UpdatedAt (Get-Date) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 437
+        Assert-Match $r.Output '001001' 'the table must still render on code page 437'
+        Assert-NoMatch $r.Output "`u{FFFD}" 'no character may be mangled by the code page'
+        # Code page 437 carries box drawing but has no filled circle, so the
+        # status marker must degrade while the frame survives.
+        Assert-Match $r.Output '(?i)\*\s*active' 'the active marker must degrade to an ascii substitute'
+        Assert-NoMatch $r.Output ([char]0x25CF) 'the filled circle is not available on code page 437'
+    }
+
+    It 'keeps box drawing on a legacy code page that supports it' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Legacy shell' -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 437
-        Assert-Match $r.Output '001001' 'the table must still render on code page 437'
-        $offenders = @()
-        foreach ($ch in $r.Output.ToCharArray()) {
-            if ([int]$ch -gt 127) { $offenders += ('U+{0:X4}' -f [int]$ch) }
-        }
-        Assert-Equal 0 @($offenders | Sort-Object -Unique).Count `
-            ('code page 437 output must be pure ascii, found: ' + (@($offenders | Sort-Object -Unique) -join ' '))
+        Assert-Match $r.Output '[\u2500-\u257F]' 'code page 437 has the box drawing set, so it should be used'
     }
 
     It 'uses box drawing when the code page supports it' {
@@ -730,6 +757,7 @@ Describe 'myco sessions presentation' {
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Modern shell' -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 65001
         Assert-Match $r.Output '[\u2500-\u257F]' 'a utf-8 console should get box drawing characters'
+        Assert-NoMatch $r.Output "`u{FFFD}" 'a utf-8 console must not mangle anything'
     }
 
     It 'tells an empty workspace apart from a missing folder' {

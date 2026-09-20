@@ -16,7 +16,7 @@
 
 Set-StrictMode -Off
 
-function Get-MycoVersion { '1.0.1' }
+function Get-MycoVersion { '1.1.0' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
@@ -45,6 +45,102 @@ function Write-MycoError {
 function Write-MycoWarning {
     param([string]$Message)
     [Console]::Error.WriteLine('myco: warning: ' + $Message)
+}
+
+# ------------------------------------------------------------------ terminal
+
+function Get-MycoConsoleWidth {
+    <#  Console width, or a sensible default. Console::WindowWidth throws when
+        output is redirected, which is exactly what happens when a listing is
+        piped or captured, so it is never the first choice. #>
+    $width = 0
+    try {
+        $size = $Host.UI.RawUI.WindowSize
+        if ($size) { $width = [int]$size.Width }
+    } catch { }
+    if ($width -le 0) {
+        try { $width = [int][Console]::WindowWidth } catch { $width = 0 }
+    }
+    if ($width -le 0) { $width = 100 }
+    if ($width -lt 60) { $width = 60 }
+    if ($width -gt 160) { $width = 160 }
+    return $width
+}
+
+function Get-MycoGlyph {
+    <#  Returns the preferred character when the console encoding can carry it,
+        otherwise a plain substitute. Code page 437, for instance, has the box
+        drawing set but no filled circle or ellipsis. #>
+    param([int]$CodePoint, [string]$Fallback, $Encoding)
+    $ch = [string][char]$CodePoint
+    if (-not $Encoding) { return $Fallback }
+    try {
+        if ($Encoding.CodePage -eq 65001) { return $ch }
+        if ($Encoding.GetString($Encoding.GetBytes($ch)) -eq $ch) { return $ch }
+    } catch { }
+    return $Fallback
+}
+
+function Get-MycoGlyphSet {
+    <#  Builds the drawing set for the current console, degrading one character
+        at a time so a legacy code page keeps whatever it can render. #>
+    $encoding = $null
+    try { $encoding = [Console]::OutputEncoding } catch { }
+
+    return [pscustomobject]@{
+        TopLeft     = Get-MycoGlyph 0x250C '+' $encoding
+        TopRight    = Get-MycoGlyph 0x2510 '+' $encoding
+        BottomLeft  = Get-MycoGlyph 0x2514 '+' $encoding
+        BottomRight = Get-MycoGlyph 0x2518 '+' $encoding
+        Horizontal  = Get-MycoGlyph 0x2500 '-' $encoding
+        Vertical    = Get-MycoGlyph 0x2502 '|' $encoding
+        TeeLeft     = Get-MycoGlyph 0x251C '+' $encoding
+        TeeRight    = Get-MycoGlyph 0x2524 '+' $encoding
+        TeeDown     = Get-MycoGlyph 0x252C '+' $encoding
+        TeeUp       = Get-MycoGlyph 0x2534 '+' $encoding
+        Cross       = Get-MycoGlyph 0x253C '+' $encoding
+        Dot         = Get-MycoGlyph 0x25CF '*' $encoding
+        Ellipsis    = Get-MycoGlyph 0x2026 '...' $encoding
+        Separator   = Get-MycoGlyph 0x00B7 '-' $encoding
+    }
+}
+
+function Format-MycoCell {
+    <#  Pads or truncates a value to exactly the requested width. #>
+    param([string]$Text, [int]$Width, [string]$Ellipsis = '...')
+    if ($null -eq $Text) { $Text = '' }
+    $clean = ($Text -replace '[\r\n\t]', ' ')
+    if ($Width -le 0) { return '' }
+    if ($clean.Length -gt $Width) {
+        if ($Width -le $Ellipsis.Length) { return $clean.Substring(0, $Width) }
+        return ($clean.Substring(0, $Width - $Ellipsis.Length) + $Ellipsis)
+    }
+    return $clean.PadRight($Width)
+}
+
+function Format-MycoRelativeTime {
+    <#  Turns a timestamp into something readable at a glance. #>
+    param([datetime]$Value)
+    $delta = [DateTime]::UtcNow - $Value.ToUniversalTime()
+    if ($delta.TotalSeconds -lt 60) { return 'just now' }
+
+    if ($delta.TotalMinutes -lt 60) {
+        $n = [int][Math]::Floor($delta.TotalMinutes)
+        return ([string]$n + ' min ago')
+    }
+    if ($delta.TotalHours -lt 24) {
+        $n = [int][Math]::Floor($delta.TotalHours)
+        $unit = ' hours ago'
+        if ($n -eq 1) { $unit = ' hour ago' }
+        return ([string]$n + $unit)
+    }
+    if ($delta.TotalDays -lt 7) {
+        $n = [int][Math]::Floor($delta.TotalDays)
+        $unit = ' days ago'
+        if ($n -eq 1) { $unit = ' day ago' }
+        return ([string]$n + $unit)
+    }
+    return $Value.ToLocalTime().ToString('yyyy-MM-dd')
 }
 
 # -------------------------------------------------------------------- paths
@@ -364,6 +460,47 @@ function ConvertTo-MycoDate {
     return $Fallback
 }
 
+function Get-MycoRunningProcessMap {
+    <#  Snapshot of live process ids and their start times, taken once so a
+        listing does not pay for a process lookup per session. #>
+    $map = @{}
+    try {
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+            if ($map.ContainsKey($p.Id)) { continue }
+            $started = $null
+            try { $started = $p.StartTime } catch { }
+            $map[$p.Id] = $started
+        }
+    } catch { }
+    return $map
+}
+
+function Test-MycoSessionActive {
+    <#  A lock proves a session is running only if its process still exists and
+        started no later than the lock was written. The process that wrote the
+        lock must have been alive at that moment, so anything that started
+        afterwards is a different program that inherited a recycled id. #>
+    param([string]$SessionDirectory, $ProcessMap)
+    $locks = @()
+    try {
+        $locks = @(Get-ChildItem -LiteralPath $SessionDirectory -Filter 'inuse.*.lock' -File -ErrorAction SilentlyContinue)
+    } catch { return $false }
+
+    foreach ($lock in $locks) {
+        if ($lock.Name -notmatch '^inuse\.(\d+)\.lock$') { continue }
+        $lockPid = 0
+        if (-not [int]::TryParse($Matches[1], [ref]$lockPid)) { continue }
+        if (-not $ProcessMap.ContainsKey($lockPid)) { continue }
+
+        $started = $ProcessMap[$lockPid]
+        # An unreadable start time means a process this session does not own,
+        # so it cannot be the Copilot run that wrote the lock.
+        if (-not $started) { continue }
+        if ($started -le $lock.LastWriteTime.AddMinutes(2)) { return $true }
+    }
+    return $false
+}
+
 function Get-MycoSessions {
     <#  Returns the workspace's sessions, most recently updated first. #>
     param([string]$CopilotHome, [int]$Max = 15)
@@ -387,21 +524,26 @@ function Get-MycoSessions {
                 $updatedAt = ConvertTo-MycoDate -Text $meta['updated_at'] -Fallback $dir.LastWriteTimeUtc
             }
         }
-        $active = $false
-        try {
-            $active = @(Get-ChildItem -LiteralPath $dir.FullName -Filter 'inuse.*.lock' -File -ErrorAction SilentlyContinue).Count -gt 0
-        } catch { }
         [void]$found.Add([pscustomobject]@{
                 Id        = $sessionId
                 Name      = $name
                 UpdatedAt = $updatedAt
-                Active    = $active
+                Directory = $dir.FullName
+                Active    = $false
             })
     }
 
     $ordered = @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
     if ($Max -gt 0 -and $ordered.Count -gt $Max) {
         $ordered = @($ordered[0..($Max - 1)])
+    }
+
+    # Liveness is resolved only for the sessions actually being shown.
+    if ($ordered.Count -gt 0) {
+        $processMap = Get-MycoRunningProcessMap
+        foreach ($session in $ordered) {
+            $session.Active = Test-MycoSessionActive -SessionDirectory $session.Directory -ProcessMap $processMap
+        }
     }
     return $ordered
 }
@@ -608,6 +750,94 @@ function Format-MycoSessionName {
     return ($clean.Substring(0, $Width - 1) + [char]0x2026)
 }
 
+function Write-MycoTableRule {
+    <#  Draws one horizontal rule with the right junction glyphs. #>
+    param($Glyphs, [int[]]$Widths, [string]$Left, [string]$Middle, [string]$Right)
+    $parts = @()
+    foreach ($w in $Widths) { $parts += ([string]$Glyphs.Horizontal * ($w + 2)) }
+    Write-MycoLine ($Left + ($parts -join $Middle) + $Right) 'DarkGray'
+}
+
+function Show-MycoWorkspaceTable {
+    <#  Renders one workspace: a titled frame, a column heading, then a row per
+        session. Column widths are fixed for the whole table so every row lines
+        up, and the name column absorbs whatever width is left. #>
+    param($Workspace, $Sessions, $Glyphs, [int]$Width)
+
+    $idWidth = 8
+    $statusWidth = 8
+    $whenWidth = 12
+    # Four columns plus their padding and five vertical rules.
+    $overhead = ($idWidth + $statusWidth + $whenWidth) + (4 * 2) + 5
+    $nameWidth = $Width - $overhead
+    if ($nameWidth -lt 12) { $nameWidth = 12 }
+    $widths = @($idWidth, $statusWidth, $whenWidth, $nameWidth)
+    $innerWidth = $overhead + $nameWidth - 2
+
+    $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) + ' (' + $Workspace.origin + ')'
+    $titleText = ([string]$Glyphs.Horizontal) + ' ' + $title + ' '
+    if ($titleText.Length -gt $innerWidth) {
+        $titleText = $titleText.Substring(0, $innerWidth)
+    }
+    $fill = [string]$Glyphs.Horizontal * ($innerWidth - $titleText.Length)
+    Write-MycoLine ([string]$Glyphs.TopLeft + $titleText + $fill + [string]$Glyphs.TopRight) 'Cyan'
+
+    Write-MycoLine ([string]$Glyphs.Vertical + ' ' + (Format-MycoCell $Workspace.path ($innerWidth - 2) $Glyphs.Ellipsis) +
+        ' ' + [string]$Glyphs.Vertical) 'DarkGray'
+
+    Write-MycoTableRule -Glyphs $Glyphs -Widths $widths `
+        -Left ([string]$Glyphs.TeeLeft) -Middle ([string]$Glyphs.TeeDown) -Right ([string]$Glyphs.TeeRight)
+
+    $heading = [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'ID' $idWidth) +
+    ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'STATUS' $statusWidth) +
+    ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'WHEN' $whenWidth) +
+    ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'SESSION' $nameWidth) +
+    ' ' + [string]$Glyphs.Vertical
+    Write-MycoLine $heading 'White'
+
+    Write-MycoTableRule -Glyphs $Glyphs -Widths $widths `
+        -Left ([string]$Glyphs.TeeLeft) -Middle ([string]$Glyphs.Cross) -Right ([string]$Glyphs.TeeRight)
+
+    $index = 0
+    foreach ($session in $Sessions) {
+        $index++
+        $sessionId = $Workspace.id + ('{0:000}' -f $index)
+        $status = ''
+        if ($session.Active) { $status = [string]$Glyphs.Dot + ' active' }
+        $name = $session.Name
+        if (-not $name) { $name = '(unnamed)' }
+
+        $row = [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $sessionId $idWidth) +
+        ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $status $statusWidth) +
+        ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell (Format-MycoRelativeTime $session.UpdatedAt) $whenWidth) +
+        ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $name $nameWidth $Glyphs.Ellipsis) +
+        ' ' + [string]$Glyphs.Vertical
+
+        $colour = ''
+        if ($session.Active) { $colour = 'Green' }
+        Write-MycoLine $row $colour
+    }
+
+    Write-MycoTableRule -Glyphs $Glyphs -Widths $widths `
+        -Left ([string]$Glyphs.BottomLeft) -Middle ([string]$Glyphs.TeeUp) -Right ([string]$Glyphs.BottomRight)
+}
+
+function Show-MycoWorkspaceNote {
+    <#  A framed one-line message for a workspace with nothing to tabulate. #>
+    param($Workspace, [string]$Note, $Glyphs, [int]$Width, [string]$Colour)
+    $innerWidth = $Width - 2
+    $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) + ' (' + $Workspace.origin + ')'
+    $titleText = ([string]$Glyphs.Horizontal) + ' ' + $title + ' '
+    if ($titleText.Length -gt $innerWidth) { $titleText = $titleText.Substring(0, $innerWidth) }
+    $fill = [string]$Glyphs.Horizontal * ($innerWidth - $titleText.Length)
+    Write-MycoLine ([string]$Glyphs.TopLeft + $titleText + $fill + [string]$Glyphs.TopRight) 'Cyan'
+    Write-MycoLine ([string]$Glyphs.Vertical + ' ' + (Format-MycoCell $Workspace.path ($innerWidth - 2) $Glyphs.Ellipsis) +
+        ' ' + [string]$Glyphs.Vertical) 'DarkGray'
+    Write-MycoLine ([string]$Glyphs.Vertical + ' ' + (Format-MycoCell $Note ($innerWidth - 2) $Glyphs.Ellipsis) +
+        ' ' + [string]$Glyphs.Vertical) $Colour
+    Write-MycoLine ([string]$Glyphs.BottomLeft + ([string]$Glyphs.Horizontal * $innerWidth) + [string]$Glyphs.BottomRight) 'DarkGray'
+}
+
 function Show-MycoSessions {
     $registry = Read-MycoRegistry
     $config = Read-MycoConfig
@@ -620,37 +850,48 @@ function Show-MycoSessions {
         return (New-MycoResult 0)
     }
 
-    Write-MycoLine ''
-    Write-MycoLine ('myco workspaces (' + $workspaces.Count + ')') 'Cyan'
+    $glyphs = Get-MycoGlyphSet
+    $width = Get-MycoConsoleWidth
 
+    # Gathered up front so the summary can lead with the running count.
+    $rendered = New-Object System.Collections.ArrayList
+    $activeTotal = 0
     foreach ($workspace in $workspaces) {
-        Write-MycoLine ''
-        Write-MycoLine ('[' + $workspace.id + '] ' + (Split-Path -Leaf $workspace.path) + '   (' + $workspace.origin + ')') 'White'
-        Write-MycoLine ('      ' + $workspace.path) 'DarkGray'
-
+        $sessions = @()
+        $note = ''
         if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) {
-            Write-MycoLine '      folder is missing - run "myco prune" to clean up' 'DarkYellow'
-            continue
+            $note = 'folder is missing - run "myco prune" to clean up'
+        } else {
+            $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $workspace.path '.copilot') -Max $config.maxSessions)
+            if ($sessions.Count -eq 0) { $note = 'no sessions yet' }
+            $activeTotal += @($sessions | Where-Object { $_.Active }).Count
         }
-
-        $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $workspace.path '.copilot') -Max $config.maxSessions)
-        if ($sessions.Count -eq 0) {
-            Write-MycoLine '      (no sessions yet)' 'DarkGray'
-            continue
-        }
-
-        $index = 0
-        foreach ($session in $sessions) {
-            $index++
-            $sessionId = $workspace.id + ('{0:000}' -f $index)
-            $flag = if ($session.Active) { '*' } else { ' ' }
-            $stamp = $session.UpdatedAt.ToLocalTime().ToString('yyyy-MM-dd HH:mm')
-            Write-MycoLine ('      ' + $sessionId + ' ' + $flag + '  ' + $stamp + '  ' + (Format-MycoSessionName $session.Name))
-        }
+        [void]$rendered.Add([pscustomobject]@{ Workspace = $workspace; Sessions = $sessions; Note = $note })
     }
 
+    $workspaceWord = 'workspaces'
+    if ($workspaces.Count -eq 1) { $workspaceWord = 'workspace' }
+    $sep = ' ' + [string]$glyphs.Separator + ' '
     Write-MycoLine ''
-    Write-MycoLine '* = session currently in use.  Resume with: myco resume <id>' 'DarkGray'
+    Write-MycoLine ('  myco' + $sep + $workspaces.Count + ' ' + $workspaceWord + $sep +
+        $activeTotal + ' active') 'Cyan'
+    Write-MycoLine ''
+
+    foreach ($entry in $rendered) {
+        if ($entry.Note) {
+            $colour = 'DarkGray'
+            if ($entry.Note -like 'folder is missing*') { $colour = 'DarkYellow' }
+            Show-MycoWorkspaceNote -Workspace $entry.Workspace -Note $entry.Note `
+                -Glyphs $glyphs -Width $width -Colour $colour
+        } else {
+            Show-MycoWorkspaceTable -Workspace $entry.Workspace -Sessions $entry.Sessions `
+                -Glyphs $glyphs -Width $width
+        }
+        Write-MycoLine ''
+    }
+
+    Write-MycoLine ('  ' + [string]$glyphs.Dot + ' active = a Copilot process is running.  ' +
+        'Resume with: myco resume <id>') 'DarkGray'
     Write-MycoLine ''
     return (New-MycoResult 0)
 }
