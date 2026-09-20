@@ -197,9 +197,32 @@ powershell -ExecutionPolicy Bypass -File test\Run-Tests.ps1 -PsExe pwsh.exe
 
 The suite drives the real entry points through real `powershell.exe`,
 `pwsh.exe` and `cmd.exe` sessions, with a recording stub standing in for the
-Copilot CLI. Each test runs in a disposable sandbox with `MYCO_HOME` and
-`USERPROFILE` redirected, so it never touches your real registry or your real
-Copilot home.
+Copilot CLI. Each test runs in a disposable sandbox with `MYCO_HOME`,
+`USERPROFILE` and `TEMP` redirected, so it never touches your real registry or
+your real Copilot home.
+
+## Maintaining myco, with or without an agent
+
+The project carries its own handoff, so an agent or a new contributor can pick
+it up cold:
+
+| File | What it holds |
+| --- | --- |
+| [`AGENTS.md`](AGENTS.md) | Architecture, invariants, the working agreement. Read by Copilot, Codex, Cursor, Gemini and other agentic tools. |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Every design decision, its rationale, and what breaks if it is reversed. |
+| `.agents/skills/myco-shell-traps/` | The Windows dual-shell traps behind those decisions, each one from a real failure. |
+| `.agents/skills/myco-maintenance/` | The test, verification and release loop. |
+| `.github/agents/myco-maintainer.agent.md` | A Copilot CLI agent preloaded with all of the above. |
+
+`.agents/skills/` is the tool-neutral location for skills; the Copilot CLI reads
+it alongside `.github/skills/` and `.claude/skills/`. Project *agents* are read
+from `.github/agents/` only. Check what your session picked up with:
+
+```console
+copilot skill list
+copilot instruction list
+copilot --agent myco-maintainer
+```
 
 ## Licence
 
