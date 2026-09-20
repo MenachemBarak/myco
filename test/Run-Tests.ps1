@@ -215,11 +215,15 @@ function New-FakeSession {
     $dir = Join-Path $CopilotHome ('session-state\' + $SessionId)
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $stamp = $UpdatedAt.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    # Copilot writes the name in YAML single-quoted style, where an apostrophe
+    # is escaped by doubling it. The fixture matches that, because a fixture
+    # that is tidier than reality hides real parsing bugs.
+    $quotedName = "'" + ($Name -replace "'", "''") + "'"
     $yaml = @(
         "id: $SessionId",
         "cwd: $SessionCwd",
         'client_name: github/cli',
-        "name: $Name",
+        "name: $quotedName",
         'user_named: false',
         'summary_count: 0',
         'fork_count: 0',
@@ -317,6 +321,15 @@ function ConvertTo-PsLiteral {
     return "'" + ($Value -replace "'", "''") + "'"
 }
 
+function Resolve-ShellExe {
+    <#  Full path to a driver shell, resolved before any PATH narrowing so the
+        harness can still start it when a test runs on a reduced PATH. #>
+    param([string]$Name)
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    return $Name
+}
+
 function Invoke-Myco {
     <#  Runs myco the way a real user would: as a dot-sourced PowerShell
         function, or as myco.cmd called from a batch script. Reports the
@@ -354,9 +367,10 @@ function Invoke-Myco {
             ('if defined COPILOT_HOME (echo LEAK=%COPILOT_HOME%>>"' + $outFile + '") else (echo LEAK=>>"' + $outFile + '")')
         )
         Set-Content -LiteralPath $driver -Value ($lines -join "`r`n") -Encoding ASCII
-        $runner = { & cmd.exe /c $driver | Out-Null }
+        $cmdExe = Resolve-ShellExe 'cmd.exe'
+        $runner = { & $cmdExe /c $driver | Out-Null }
     } else {
-        $psExe = if ($Shell -eq 'pwsh7') { 'pwsh.exe' } else { $script:DefaultPsExe }
+        $psExe = Resolve-ShellExe $(if ($Shell -eq 'pwsh7') { 'pwsh.exe' } else { $script:DefaultPsExe })
         $driver = Join-Path $Sandbox.Root ("drv-$id.ps1")
         $argList = if ($MycoArgs.Count -gt 0) {
             ($MycoArgs | ForEach-Object { ConvertTo-PsLiteral $_ }) -join ','
@@ -816,6 +830,17 @@ Describe 'myco sessions presentation' {
         Assert-NoMatch $r.Output "`u{FFFD}" 'a utf-8 console must not mangle anything'
     }
 
+    It 'shows an apostrophe in a session name exactly once' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') `
+            -Name "Fix the user's login" -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output "Fix the user's login" 'the name must read naturally'
+        Assert-NoMatch $r.Output "user''s" 'the yaml escape must not leak into the display'
+    }
+
     It 'tells an empty workspace apart from a missing folder' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
@@ -1071,6 +1096,22 @@ Describe 'myco recover' {
         Assert-Match $r.Output '(?i)windows terminal' 'must name the missing dependency'
         Assert-Match $r.Output '(?i)--dry-run|myco resume' 'must offer a way forward'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
+    }
+
+    It 'keeps a long session name readable in the recover list' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $long = 'q' * 300
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name $long `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
+        Assert-NoMatch $r.Output ([regex]::Escape($long)) 'an over-long name must be truncated in the list'
+        $longest = 0
+        foreach ($line in ($r.Output -split "`r?`n")) {
+            if ($line.TrimEnd().Length -gt $longest) { $longest = $line.TrimEnd().Length }
+        }
+        Assert-True ($longest -le 200) ("no line may run away with the terminal, longest was $longest")
     }
 
     It 'is documented in help' {
