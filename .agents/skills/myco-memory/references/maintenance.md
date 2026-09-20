@@ -64,29 +64,38 @@ Rules:
 - Anything about processes, encodings or shells must be driven through the real
   thing. Mocking those tests the mock — see `decisions.md` 8.4.
 
-## Verify against the real CLI
+## Verify against the real tools
 
-The stub cannot catch everything; it already missed an argument-passing bug.
-For anything touching argument handling, launching or session state, do a live
-check with a throwaway folder:
-
-```powershell
-$p = Join-Path $env:TEMP 'myco-check\demo'
-New-Item -ItemType Directory -Force -Path $p | Out-Null
-# in a child shell, so your own session is untouched:
-#   Set-Location $p
-#   . "$env:APPDATA\.myco\app\bin\myco.ps1"
-#   myco start -p 'reply with exactly OK' --silent
-```
-
-Then clean up, and remove the workspace from the registry:
+The stubs cannot see how the real Copilot CLI and the real Windows Terminal
+*parse* what myco hands them, and two bugs have escaped through that gap: an
+argument list collapsed by the npm `copilot.ps1` shim, and a command split in
+half by Windows Terminal at an embedded semicolon. Run the live check before a
+release, and after touching launching, argument handling or session state:
 
 ```powershell
-myco forget <id>
-Remove-Item (Join-Path $env:TEMP 'myco-check') -Recurse -Force
+pwsh -NoProfile -ExecutionPolicy Bypass -File test\Verify-Live.ps1
 ```
 
-`-p ... --silent` keeps a live check to a couple of seconds and a few credits.
+It creates one real session, runs `myco recover` verbatim, and proves the
+recovered tab actually resumed by waiting for a Copilot process to attach and
+write its lock file. It costs a few AI credits and briefly opens a window,
+which it minimises and then closes.
+
+**Never improvise a probe instead.** It is isolated in three dimensions, and
+each one was learned the hard way:
+
+| Dimension | How | Why |
+| --- | --- | --- |
+| State | temp `MYCO_HOME`, workspace under `%TEMP%` | the real registry is never read or written |
+| Windows | window handles captured before and after; only new ones closed | a failed tab keeps its window open, so ad-hoc probes litter the user's screen |
+| Processes | Copilot pids captured before and after; only new ones stopped | never kill a session you did not start |
+
+Windows Terminal hosts every window in **one** process, so never kill
+`WindowsTerminal` — that would close the user's own sessions. Enumerate
+top-level windows and post `WM_CLOSE` to the specific handles, once per tab.
+
+And do not substitute the payload when checking a launch. Verifying a
+semicolon-free stand-in is what let the semicolon bug through.
 
 ## Leave the machine as you found it
 

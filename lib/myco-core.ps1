@@ -1110,9 +1110,20 @@ function Get-MycoTabShell {
     return 'powershell.exe'
 }
 
+function Format-MycoTabTitle {
+    <#  Windows Terminal splits its command line on ';' wherever it appears, so
+        a title carrying one would start a second, broken tab. Nothing else
+        needs escaping, because arguments are passed as argv rather than
+        through a shell. #>
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    return (($Text -replace ';', ',') -replace '[\r\n\t]', ' ').Trim()
+}
+
 function New-MycoRecoverTabArgs {
     <#  Builds the Windows Terminal argument list: one new-tab per session,
-        separated by the literal ';' that wt uses to chain subcommands. #>
+        separated by the literal ';' that wt uses to chain subcommands. No
+        other argument may contain a semicolon. #>
     param($Candidates, [bool]$Here)
 
     $launcher = Get-MycoLauncherPath
@@ -1131,15 +1142,13 @@ function New-MycoRecoverTabArgs {
         if (-not $first) { [void]$wtArgs.Add(';') }
         $first = $false
 
-        $title = $candidate.Name
+        $title = Format-MycoTabTitle $candidate.Name
         if (-not $title) { $title = Split-Path -Leaf $candidate.Path }
 
-        # Dot-sourced explicitly so the tab does not depend on the user's
-        # profile having been set up, and resumed by concrete session id so a
-        # shifting list position cannot open the wrong conversation.
-        $command = ". '" + ($launcher -replace "'", "''") + "'; " +
-        "myco resume " + $candidate.SessionId
-
+        # Run the launcher as a script file rather than an inline command: it
+        # defines the myco function and then runs the arguments it was given,
+        # so no statement separator is needed and nothing can be split. The
+        # session is resumed by uuid, never by a list position.
         [void]$wtArgs.Add('new-tab')
         [void]$wtArgs.Add('--title')
         [void]$wtArgs.Add($title)
@@ -1147,8 +1156,10 @@ function New-MycoRecoverTabArgs {
         [void]$wtArgs.Add($candidate.Path)
         [void]$wtArgs.Add($shell)
         [void]$wtArgs.Add('-NoExit')
-        [void]$wtArgs.Add('-Command')
-        [void]$wtArgs.Add($command)
+        [void]$wtArgs.Add('-File')
+        [void]$wtArgs.Add($launcher)
+        [void]$wtArgs.Add('resume')
+        [void]$wtArgs.Add($candidate.SessionId)
     }
 
     return @($wtArgs.ToArray())

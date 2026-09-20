@@ -146,3 +146,43 @@ only in `pwsh`.
 Passing user arguments from `cmd.exe` to PowerShell as `MYCO_ARGC` and
 `MYCO_ARG_n` removes a whole quoting layer. Prompts containing spaces, quotes or
 `%` survive untouched, and nothing binds to PowerShell's parameter parser.
+
+## 11. Windows Terminal splits on `;` anywhere
+
+`wt` parses its whole command line and treats `;` as its subcommand separator
+**regardless of argv boundaries**. A semicolon inside any argument silently
+ends the current tab's command and starts another.
+
+```powershell
+# WRONG - two tabs, neither resumes
+wt new-tab -d $dir pwsh -NoExit -Command ". '$launcher'; myco resume $id"
+
+# RIGHT - no statement separator is needed
+wt new-tab -d $dir pwsh -NoExit -File $launcher resume $id
+```
+
+The broken half surfaces as:
+
+```
+[error 2147942402 (0x80070002) when launching `" myco resume <uuid>"']
+The system cannot find the file specified.
+```
+
+This applies to `--title` too, so any user-supplied text must have semicolons
+removed before it becomes a title. Measured: `&`, `|`, `"` and `%` are all
+safe, because arguments are passed as argv rather than through a shell.
+
+A stub cannot catch this, because the stub records arguments instead of parsing
+them. Assert the invariant directly — no argument except the separator may
+contain `;` — and verify against real `wt` **without substituting the payload**.
+
+## 12. Verifying against real windows without leaving a mess
+
+Windows Terminal hosts every window in **one** process, so killing that process
+would close the user's own sessions. Enumerate top-level windows instead,
+capture the handles before launching, and close only the new ones with
+`WM_CLOSE` — once per tab, since a window with several tabs needs several.
+
+`test/Verify-Live.ps1` implements this alongside temp `MYCO_HOME` isolation and
+before/after Copilot process tracking. Use it rather than ad-hoc probes: an
+ad-hoc probe whose tab fails leaves its window open on the user's screen.

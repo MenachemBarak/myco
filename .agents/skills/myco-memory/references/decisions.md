@@ -462,9 +462,84 @@ bugs — the same way the missing `copilot.ps1` stub did in 2.6.
 
 ---
 
-## 11. Housekeeping
+## 11. Semicolons and Windows Terminal
 
-### 11.1 Abandoned plan files are swept
+### 11.1 No argument passed to `wt` may contain a semicolon
+
+**Measured, after a real failure.** Windows Terminal splits its whole command
+line on `;` wherever it appears, regardless of argv boundaries. The first
+implementation passed an inline payload:
+
+```
+pwsh -NoExit -Command ". '<install>\bin\myco.ps1'; myco resume <uuid>"
+```
+
+wt ended the first tab's command at that semicolon and started a second tab
+whose executable was the remaining text, producing two tabs per session: a
+shell that never resumed, and
+
+```
+[error 2147942402 (0x80070002) when launching `" myco resume <uuid>"']
+```
+
+**The fix.** Tabs now run `-File <launcher> resume <uuid>`, which needs no
+statement separator. `bin\myco.ps1` already ends by running the arguments it
+was given, so the same file both defines the function and performs the resume.
+
+**The same trap applies to titles.** A session named `Fix this; then that`
+would split identically, so titles have semicolons replaced. Nothing else needs
+escaping: `&`, `|`, `"` and `%` all survive, because arguments are passed as
+argv rather than through a shell. All four were measured.
+
+### 11.2 Why the suite did not catch it
+
+The stub records arguments and does not parse them, so it cannot see a split
+that happens inside wt. Worse, the earlier live check **substituted a
+semicolon-free payload** for the real one; it verified the shape of the
+argument vector and not its content, which is exactly where the bug was.
+
+**Lesson, for the third time in this project.** A double that is tidier than
+the real thing — a `.cmd`-only stub for a `.ps1` shim, an unquoted fixture for
+a YAML-quoted name, a simplified payload for the real command — hides the class
+of bug it was meant to catch. The suite now asserts the invariant directly: no
+argument other than the separator may contain a semicolon.
+
+---
+
+## 12. Live verification
+
+### 12.1 `test/Verify-Live.ps1` exercises the real tools, and reverts
+
+The stubbed suite cannot see how the real Copilot CLI and the real Windows
+Terminal parse what myco hands them, and two bugs escaped through that gap. The
+live script creates one real session, runs `myco recover` verbatim, and proves
+the recovered tab actually resumed by waiting for a Copilot process to attach
+and write its lock file.
+
+**Nothing about the launch is substituted**, because substituting the payload
+is what hid the semicolon bug.
+
+### 12.2 It is isolated in three dimensions
+
+| Dimension | How |
+| --- | --- |
+| State | `MYCO_HOME` and the workspace live under `%TEMP%`, so the real registry is never read or written. |
+| Windows | Terminal window handles are captured before and after; only genuinely new windows are closed. |
+| Processes | Copilot process ids are captured before and after; only new ones are stopped. |
+
+**Why handles rather than processes.** Windows Terminal hosts every window in a
+single process, so killing that process would close the user's own sessions.
+Windows are enumerated individually and closed with `WM_CLOSE`, once per tab.
+
+**Why it is not part of the suite.** It costs AI credits and opens a real
+window. It is run deliberately, before a release or after touching anything the
+stubs cannot model.
+
+---
+
+## 13. Housekeeping
+
+### 13.1 Abandoned plan files are swept
 
 `myco-plan-*.cmd` fragments older than a day are removed from `TEMP` at startup;
 fresher ones are left alone in case another myco is mid-flight.
@@ -472,14 +547,14 @@ fresher ones are left alone in case another myco is mid-flight.
 **Why.** A `cmd.exe` run interrupted while the plan is executing never reaches
 its own cleanup.
 
-### 11.2 User-scope install, no administrator rights
+### 13.2 User-scope install, no administrator rights
 
 Copies to `%APPDATA%\.myco\app`, appends to the **user** `PATH`, and rewrites a
 single marked line in the PowerShell profiles.
 
 **Why idempotent.** Re-running the installer must not accumulate profile lines.
 
-### 11.3 PowerShell 5.1 compatibility is kept
+### 13.3 PowerShell 5.1 compatibility is kept
 
 No `if` used as an inline expression inside a larger expression, and no
 PS7-only operators.

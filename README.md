@@ -233,10 +233,21 @@ powershell -ExecutionPolicy Bypass -File test\Run-Tests.ps1 -PsExe pwsh.exe
 ```
 
 The suite drives the real entry points through real `powershell.exe`,
-`pwsh.exe` and `cmd.exe` sessions, with a recording stub standing in for the
-Copilot CLI. Each test runs in a disposable sandbox with `MYCO_HOME`,
-`USERPROFILE` and `TEMP` redirected, so it never touches your real registry or
-your real Copilot home.
+`pwsh.exe` and `cmd.exe` sessions, with recording stubs standing in for the
+Copilot CLI and Windows Terminal. Each test runs in a disposable sandbox with
+`MYCO_HOME`, `USERPROFILE` and `TEMP` redirected, so it never touches your real
+registry or your real Copilot home.
+
+Stubs record arguments but do not parse them, so a separate opt-in script
+exercises the real tools end to end:
+
+```console
+pwsh -ExecutionPolicy Bypass -File test\Verify-Live.ps1
+```
+
+It creates one real session, runs `myco recover` verbatim, and checks that the
+recovered tab genuinely resumed. It isolates its state under `%TEMP%`, and
+closes only the windows and processes it started.
 
 ## Maintaining myco, with or without an agent
 
