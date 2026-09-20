@@ -156,7 +156,9 @@ function New-FakeSession {
         [datetime]$UpdatedAt,
         [string]$SessionCwd = 'D:\somewhere',
         [switch]$Active,
-        [string]$SessionId
+        [string]$SessionId,
+        [int]$LockPid = 4242,
+        [Nullable[datetime]]$LockWrittenAt = $null
     )
     if (-not $SessionId) { $SessionId = [guid]::NewGuid().ToString() }
     $dir = Join-Path $CopilotHome ('session-state\' + $SessionId)
@@ -176,9 +178,48 @@ function New-FakeSession {
     Set-Content -LiteralPath (Join-Path $dir 'workspace.yaml') -Value $yaml -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $dir 'events.jsonl') -Value '{}' -Encoding UTF8
     if ($Active) {
-        Set-Content -LiteralPath (Join-Path $dir 'inuse.4242.lock') -Value '' -Encoding ASCII
+        $lock = Join-Path $dir ('inuse.' + $LockPid + '.lock')
+        Set-Content -LiteralPath $lock -Value '' -Encoding ASCII
+        if ($LockWrittenAt) {
+            (Get-Item -LiteralPath $lock).LastWriteTime = $LockWrittenAt
+        }
     }
     return $SessionId
+}
+
+$script:SpawnedProcesses = New-Object System.Collections.ArrayList
+
+function Start-TestProcess {
+    <#  A real, live process standing in for a running Copilot session, so
+        liveness is exercised against the operating system rather than a mock. #>
+    $p = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 300' `
+        -PassThru -WindowStyle Hidden
+    [void]$script:SpawnedProcesses.Add($p)
+    for ($i = 0; $i -lt 100; $i++) {
+        try { if ($p.StartTime) { break } } catch { }
+        Start-Sleep -Milliseconds 50
+    }
+    return $p
+}
+
+function Stop-TestProcesses {
+    foreach ($p in @($script:SpawnedProcesses)) {
+        try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+    $script:SpawnedProcesses.Clear()
+}
+
+function Get-TableRow {
+    <#  Returns the rendered table rows, in either the box-drawing or the
+        ascii-fallback style, with trailing blanks removed. #>
+    param([string]$Text)
+    $rows = @()
+    foreach ($line in ($Text -split "`r?`n")) {
+        $trimmed = $line.TrimEnd()
+        if ($trimmed -match '^\s*[\u2502|]') { $rows += $trimmed }
+    }
+    return $rows
 }
 
 function Get-CopilotCalls {
@@ -234,7 +275,8 @@ function Invoke-Myco {
         $Sandbox,
         [string]$WorkDir,
         [string[]]$MycoArgs = @(),
-        [ValidateSet('pwsh', 'cmd', 'pwsh7')][string]$Shell = 'pwsh'
+        [ValidateSet('pwsh', 'cmd', 'pwsh7')][string]$Shell = 'pwsh',
+        [int]$CodePage = 0
     )
 
     $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -245,8 +287,9 @@ function Invoke-Myco {
         $quoted = ($MycoArgs | ForEach-Object {
                 if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '""') + '"' } else { $_ }
             }) -join ' '
-        $lines = @(
-            '@echo off',
+        $lines = @('@echo off')
+        if ($CodePage -gt 0) { $lines += ('chcp ' + $CodePage + ' >nul') }
+        $lines += @(
             ('cd /d "' + $WorkDir + '"'),
             ('call "' + $script:MycoCmd + '" ' + $quoted),
             'echo MYCO_EXIT=%ERRORLEVEL%',
@@ -517,14 +560,61 @@ Describe 'myco sessions' {
         Assert-NoMatch $r.Output '001016' 'no more than 15 sessions may be listed'
     }
 
-    It 'marks sessions that are currently active' {
+    It 'marks a session whose process is still running as active' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
         $ch = Join-Path $proj '.copilot'
-        $null = New-FakeSession -CopilotHome $ch -Name 'Live one' -UpdatedAt (Get-Date) -Active
+        $live = Start-TestProcess
+        $null = New-FakeSession -CopilotHome $ch -Name 'Live one' -UpdatedAt (Get-Date) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
-        Assert-Match $r.Output '001001\s+\*' 'an in-use session must be flagged with *'
+        Assert-Match $r.Output '(?i)001001[^\r\n]*active' 'a running session must be labelled active'
+    }
+
+    It 'does not mark a session whose process has exited' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $dead = Start-TestProcess
+        $deadId = $dead.Id
+        Stop-Process -Id $deadId -Force
+        Start-Sleep -Milliseconds 400
+        $null = New-FakeSession -CopilotHome $ch -Name 'Long gone' -UpdatedAt (Get-Date) `
+            -Active -LockPid $deadId
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output '(?i)001001[^\r\n]*active' 'a lock left by a dead process must not read as active'
+    }
+
+    It 'does not mistake a recycled process id for a running session' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $live = Start-TestProcess
+        # The lock predates this process, so the process cannot be its author;
+        # Windows simply handed the same id out again.
+        $null = New-FakeSession -CopilotHome $ch -Name 'Recycled id' -UpdatedAt (Get-Date) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddHours(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output '(?i)001001[^\r\n]*active' 'a recycled process id must not read as active'
+    }
+
+    It 'counts only genuinely running sessions in the summary' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $live = Start-TestProcess
+        $null = New-FakeSession -CopilotHome $ch -Name 'Running' -UpdatedAt (Get-Date) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
+        for ($i = 1; $i -le 3; $i++) {
+            $null = New-FakeSession -CopilotHome $ch -Name ("Stale $i") -UpdatedAt (Get-Date).AddHours(-$i) `
+                -Active -LockPid 999990 -LockWrittenAt (Get-Date).AddHours(-$i)
+        }
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)1 active' 'the summary must count one running session, not four locks'
     }
 
     It 'reports an empty registry cleanly' {
@@ -542,6 +632,116 @@ Describe 'myco sessions' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '\[000\]' 'the global copilot home must never be listed'
+    }
+}
+
+Describe 'myco sessions presentation' {
+
+    It 'renders sessions as an aligned table' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Short' -UpdatedAt (Get-Date)
+        $null = New-FakeSession -CopilotHome $ch -Name 'A considerably longer session name' -UpdatedAt (Get-Date).AddHours(-2)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        $rows = @(Get-TableRow -Text $r.Output)
+        Assert-True ($rows.Count -ge 3) ("expected a table with a heading and two rows. Output:`n" + $r.Output)
+        $widths = @($rows | ForEach-Object { $_.Length } | Sort-Object -Unique)
+        Assert-Equal 1 $widths.Count ('every table row must be the same width, got widths: ' + ($widths -join ', '))
+    }
+
+    It 'labels the session columns' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Some work' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)\bID\b' 'the id column must be labelled'
+        Assert-Match $r.Output '(?i)\bwhen\b|\bupdated\b' 'the time column must be labelled'
+        Assert-Match $r.Output '(?i)\bsession\b' 'the name column must be labelled'
+    }
+
+    It 'summarises workspace and active counts' {
+        $sb = New-Sandbox
+        $a = New-Project -Sandbox $sb -Name 'alpha'
+        $b = New-Project -Sandbox $sb -Name 'beta'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)2 workspaces' 'the summary must count the workspaces'
+        Assert-Match $r.Output '(?i)0 active' 'the summary must report how many sessions are running'
+    }
+
+    It 'shows how long ago a session was last updated' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Recent' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)\b5\s*m(in)?\w*\s+ago\b' 'a recent session must show a relative time'
+    }
+
+    It 'keeps long session names inside the table' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $long = 'x' * 300
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name $long -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output ([regex]::Escape($long)) 'an over-long name must be truncated'
+        $longest = 0
+        foreach ($line in ($r.Output -split "`r?`n")) {
+            if ($line.TrimEnd().Length -gt $longest) { $longest = $line.TrimEnd().Length }
+        }
+        Assert-True ($longest -le 200) ("no line may run away with the terminal, longest was $longest")
+    }
+
+    It 'still renders when output is redirected and no console width exists' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Piped' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output '(?i)handle is invalid|WindowWidth|exception' 'width lookup must not fail when piped'
+        Assert-Match $r.Output '001001' 'the table must still render'
+    }
+
+    It 'falls back to plain ascii on a legacy code page' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Legacy shell' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 437
+        Assert-Match $r.Output '001001' 'the table must still render on code page 437'
+        $offenders = @()
+        foreach ($ch in $r.Output.ToCharArray()) {
+            if ([int]$ch -gt 127) { $offenders += ('U+{0:X4}' -f [int]$ch) }
+        }
+        Assert-Equal 0 @($offenders | Sort-Object -Unique).Count `
+            ('code page 437 output must be pure ascii, found: ' + (@($offenders | Sort-Object -Unique) -join ' '))
+    }
+
+    It 'uses box drawing when the code page supports it' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Modern shell' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 65001
+        Assert-Match $r.Output '[\u2500-\u257F]' 'a utf-8 console should get box drawing characters'
+    }
+
+    It 'tells an empty workspace apart from a missing folder' {
+        $sb = New-Sandbox
+        $a = New-Project -Sandbox $sb -Name 'alpha'
+        $b = New-Project -Sandbox $sb -Name 'beta'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        Remove-Item -LiteralPath $b -Recurse -Force
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)no sessions' 'an empty but present workspace must say so'
+        Assert-Match $r.Output '(?i)missing|prune' 'a vanished folder must be called out'
     }
 }
 
@@ -899,8 +1099,10 @@ if ($script:Failed -gt 0) {
 }
 
 if (-not $KeepSandbox) {
+    Stop-TestProcesses
     Remove-Item -LiteralPath $script:SandboxRoot -Recurse -Force -ErrorAction SilentlyContinue
 } else {
+    Stop-TestProcesses
     Write-Host ('sandbox kept at: ' + $script:SandboxRoot) -ForegroundColor DarkGray
 }
 
