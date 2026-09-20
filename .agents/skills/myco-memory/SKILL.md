@@ -48,6 +48,16 @@ large stops working.
 
 Do not read all three speculatively. Each is self-contained.
 
+## Commands
+
+`start`, `continue`, `sessions`, `resume`, `recover`, `status`, `config`,
+`forget`, `prune`, `version`, `help`.
+
+`recover` reopens every session touched in a window — two hours by default,
+`--hours=<n>` to change — as one Windows Terminal tab each. It is the only
+command that needs `wt`, and it skips sessions that are still running unless
+given `--all`.
+
 ## Repository map
 
 ```
@@ -85,6 +95,10 @@ breaking them.
   itself.
 - **Active means a process genuinely exists and started no later than its lock
   was written.** Do not simplify this back to "a lock file exists".
+- **`recover` resumes concrete session ids, never list positions**, and skips
+  sessions that are still running unless asked otherwise.
+- **The Windows Terminal stub must stay first on `PATH` in tests.** Without it
+  the suite opens real terminal windows.
 - **Nothing is emitted that the console cannot render**; glyphs degrade one
   character at a time.
 - **Terminal width comes from `$Host.UI.RawUI`.** `[Console]::WindowWidth`

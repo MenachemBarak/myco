@@ -16,7 +16,17 @@
 
 Set-StrictMode -Off
 
-function Get-MycoVersion { '1.1.0' }
+# Captured at load time so the launcher can be located however core was reached.
+$script:MycoLibRoot = $PSScriptRoot
+
+function Get-MycoLauncherPath {
+    <#  Full path to bin\myco.ps1, used when a recovered tab needs to define
+        the `myco` function for itself rather than rely on a profile. #>
+    if (-not $script:MycoLibRoot) { return '' }
+    return (Join-Path (Split-Path -Parent $script:MycoLibRoot) 'bin\myco.ps1')
+}
+
+function Get-MycoVersion { '1.2.0' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
@@ -438,8 +448,14 @@ function Read-MycoSessionMeta {
             if ($value.Length -ge 2) {
                 $first = $value.Substring(0, 1)
                 $last = $value.Substring($value.Length - 1, 1)
-                if (($first -eq '"' -and $last -eq '"') -or ($first -eq "'" -and $last -eq "'")) {
+                if ($first -eq '"' -and $last -eq '"') {
                     $value = $value.Substring(1, $value.Length - 2)
+                    $value = $value -replace '\\"', '"' -replace '\\\\', '\'
+                } elseif ($first -eq "'" -and $last -eq "'") {
+                    # YAML single-quoted style escapes an apostrophe by
+                    # doubling it, which is how Copilot writes session names.
+                    $value = $value.Substring(1, $value.Length - 2)
+                    $value = $value -replace "''", "'"
                 }
             }
             $meta[$key] = $value
@@ -679,6 +695,13 @@ function Show-MycoHelp {
     Write-MycoLine '  myco resume <id>               Move into the folder and resume.'
     Write-MycoLine '                                 <id> is 001 (latest session of folder 001)'
     Write-MycoLine '                                 or 001002 (second session of folder 001).'
+    Write-MycoLine '  myco recover [options]         Reopen every session touched in the last'
+    Write-MycoLine '                                 2 hours, one Windows Terminal tab each.'
+    Write-MycoLine '                                 --hours=<n>  widen or narrow the window'
+    Write-MycoLine '                                 --dry-run    list them without opening'
+    Write-MycoLine '                                 --all        include still-running sessions'
+    Write-MycoLine '                                 --here       add tabs to this window'
+    Write-MycoLine '                                 --max=<n>    raise the tab cap'
     Write-MycoLine '  myco status                    Describe the current folder.'
     Write-MycoLine '  myco config [key] [value]      Show or change settings (seed, maxSessions).'
     Write-MycoLine '  myco forget <id>               Drop a folder from the registry only.'
@@ -966,6 +989,261 @@ function Invoke-MycoResumeRaw {
     return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
 }
 
+function Get-MycoDefaultRecoverHours { 2 }
+function Get-MycoDefaultRecoverMax { 12 }
+
+function Read-MycoRecoverOptions {
+    <#  Parses recover's flags. Returns an object with an Error string set when
+        something is wrong, so the caller can report and stop. #>
+    param([string[]]$Arguments)
+    $options = [pscustomobject]@{
+        Hours     = Get-MycoDefaultRecoverHours
+        Max       = Get-MycoDefaultRecoverMax
+        DryRun    = $false
+        All       = $false
+        Here      = $false
+        Error     = ''
+    }
+
+    $argv = @($Arguments)
+    for ($i = 0; $i -lt $argv.Count; $i++) {
+        $arg = [string]$argv[$i]
+        $name = $arg
+        $value = $null
+        if ($arg -match '^(--[a-zA-Z-]+)=(.*)$') {
+            $name = $Matches[1]
+            $value = $Matches[2]
+        }
+
+        switch ($name.ToLowerInvariant()) {
+            '--hours' {
+                if ($null -eq $value) {
+                    if ($i + 1 -ge $argv.Count) {
+                        $options.Error = '--hours needs a number, for example: myco recover --hours=6'
+                        return $options
+                    }
+                    $i++
+                    $value = [string]$argv[$i]
+                }
+                $parsed = 0.0
+                if (-not [double]::TryParse($value, [System.Globalization.NumberStyles]::Float,
+                        [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -or
+                    $parsed -le 0 -or $parsed -gt 8760) {
+                    $options.Error = ('--hours must be a positive number of hours, got "' + $value + '"')
+                    return $options
+                }
+                $options.Hours = $parsed
+            }
+            '--max' {
+                if ($null -eq $value) {
+                    if ($i + 1 -ge $argv.Count) {
+                        $options.Error = '--max needs a number, for example: myco recover --max=20'
+                        return $options
+                    }
+                    $i++
+                    $value = [string]$argv[$i]
+                }
+                $parsed = 0
+                if (-not [int]::TryParse($value, [ref]$parsed) -or $parsed -lt 1) {
+                    $options.Error = ('--max must be a whole number of tabs, got "' + $value + '"')
+                    return $options
+                }
+                $options.Max = $parsed
+            }
+            '--dry-run' { $options.DryRun = $true }
+            '--all' { $options.All = $true }
+            '--here' { $options.Here = $true }
+            default {
+                $options.Error = ('unknown option "' + $arg +
+                    '". recover accepts --hours, --max, --dry-run, --all and --here.')
+                return $options
+            }
+        }
+    }
+    return $options
+}
+
+function Get-MycoRecoverCandidates {
+    <#  Every session across every workspace that was touched inside the window,
+        newest first. Sessions with a live process are left out unless asked
+        for: they did not need recovering, and a second process on one session
+        would contend for its state. #>
+    param($Registry, [double]$Hours, [bool]$IncludeRunning, [int]$PerWorkspace)
+    $cutoff = [DateTime]::UtcNow.AddHours(-$Hours)
+    $found = New-Object System.Collections.ArrayList
+
+    foreach ($workspace in @($Registry.workspaces)) {
+        if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) { continue }
+        $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $workspace.path '.copilot') -Max $PerWorkspace)
+        $index = 0
+        foreach ($session in $sessions) {
+            $index++
+            if ($session.UpdatedAt.ToUniversalTime() -lt $cutoff) { continue }
+            if ($session.Active -and -not $IncludeRunning) { continue }
+            [void]$found.Add([pscustomobject]@{
+                    WorkspaceId = $workspace.id
+                    Path        = $workspace.path
+                    ShortId     = $workspace.id + ('{0:000}' -f $index)
+                    SessionId   = $session.Id
+                    Name        = $session.Name
+                    UpdatedAt   = $session.UpdatedAt
+                    Active      = $session.Active
+                })
+        }
+    }
+
+    return @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
+}
+
+function Get-MycoTabShell {
+    <#  The PowerShell used inside a recovered tab. pwsh when present, because
+        it is the better terminal, falling back to the one every box has. #>
+    if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { return 'pwsh.exe' }
+    return 'powershell.exe'
+}
+
+function New-MycoRecoverTabArgs {
+    <#  Builds the Windows Terminal argument list: one new-tab per session,
+        separated by the literal ';' that wt uses to chain subcommands. #>
+    param($Candidates, [bool]$Here)
+
+    $launcher = Get-MycoLauncherPath
+    $shell = Get-MycoTabShell
+    $wtArgs = New-Object System.Collections.ArrayList
+
+    if ($Here) {
+        # 0 is the current window; tabs join it instead of opening a new one.
+        [void]$wtArgs.Add('-w'); [void]$wtArgs.Add('0')
+    } else {
+        [void]$wtArgs.Add('-w'); [void]$wtArgs.Add('new')
+    }
+
+    $first = $true
+    foreach ($candidate in $Candidates) {
+        if (-not $first) { [void]$wtArgs.Add(';') }
+        $first = $false
+
+        $title = $candidate.Name
+        if (-not $title) { $title = Split-Path -Leaf $candidate.Path }
+
+        # Dot-sourced explicitly so the tab does not depend on the user's
+        # profile having been set up, and resumed by concrete session id so a
+        # shifting list position cannot open the wrong conversation.
+        $command = ". '" + ($launcher -replace "'", "''") + "'; " +
+        "myco resume " + $candidate.SessionId
+
+        [void]$wtArgs.Add('new-tab')
+        [void]$wtArgs.Add('--title')
+        [void]$wtArgs.Add($title)
+        [void]$wtArgs.Add('-d')
+        [void]$wtArgs.Add($candidate.Path)
+        [void]$wtArgs.Add($shell)
+        [void]$wtArgs.Add('-NoExit')
+        [void]$wtArgs.Add('-Command')
+        [void]$wtArgs.Add($command)
+    }
+
+    return @($wtArgs.ToArray())
+}
+
+function Invoke-MycoRecover {
+    param([string[]]$RecoverArgs)
+
+    $options = Read-MycoRecoverOptions -Arguments $RecoverArgs
+    if ($options.Error) {
+        Write-MycoError $options.Error
+        return (New-MycoResult 2)
+    }
+
+    $registry = Read-MycoRegistry
+    if (@($registry.workspaces).Count -eq 0) {
+        Write-MycoLine ''
+        Write-MycoLine 'No workspaces yet, so there is nothing to recover.'
+        Write-MycoLine ''
+        return (New-MycoResult 0)
+    }
+
+    $config = Read-MycoConfig
+    $candidates = @(Get-MycoRecoverCandidates -Registry $registry -Hours $options.Hours `
+            -IncludeRunning $options.All -PerWorkspace $config.maxSessions)
+
+    $glyphs = Get-MycoGlyphSet
+    $window = Format-MycoHours $options.Hours
+
+    if ($candidates.Count -eq 0) {
+        Write-MycoLine ''
+        Write-MycoLine ('  Nothing to recover from the last ' + $window + '.') 'Cyan'
+        if (-not $options.All) {
+            Write-MycoLine '  Sessions that are still running are left alone; add --all to reopen them too.' 'DarkGray'
+        }
+        Write-MycoLine ''
+        return (New-MycoResult 0)
+    }
+
+    Write-MycoLine ''
+    $verb = 'Recovering'
+    if ($options.DryRun) { $verb = 'Would recover' }
+    Write-MycoLine ('  ' + $verb + ' ' + $candidates.Count + ' session(s) from the last ' + $window) 'Cyan'
+    Write-MycoLine ''
+    foreach ($candidate in $candidates) {
+        $name = $candidate.Name
+        if (-not $name) { $name = '(unnamed)' }
+        $flag = ''
+        if ($candidate.Active) { $flag = '  ' + [string]$glyphs.Dot + ' running' }
+        $folder = Split-Path -Leaf $candidate.Path
+        $nameWidth = (Get-MycoConsoleWidth) - 34 - $folder.Length
+        if ($nameWidth -lt 16) { $nameWidth = 16 }
+        Write-MycoLine ('   ' + [string]$glyphs.Separator + ' ' + $candidate.ShortId + '  ' +
+            (Format-MycoCell (Format-MycoRelativeTime $candidate.UpdatedAt) 12) + '  ' +
+            $folder + '  ' + (Format-MycoCell $name $nameWidth $glyphs.Ellipsis).TrimEnd() + $flag)
+    }
+    Write-MycoLine ''
+
+    if ($candidates.Count -gt $options.Max) {
+        Write-MycoError ('that is ' + $candidates.Count + ' tabs, more than the cap of ' + $options.Max +
+            '. Narrow it with --hours, or raise the cap with --max=' + $candidates.Count + '.')
+        return (New-MycoResult 2)
+    }
+
+    if ($options.DryRun) {
+        Write-MycoLine '  Dry run: nothing was opened.' 'DarkGray'
+        Write-MycoLine ''
+        return (New-MycoResult 0)
+    }
+
+    if (-not (Get-Command wt -ErrorAction SilentlyContinue)) {
+        Write-MycoError ('Windows Terminal (wt) was not found on PATH, so tabs cannot be opened. ' +
+            'Install it from the Microsoft Store, use "myco recover --dry-run" to see the list, ' +
+            'or reopen one at a time with "myco resume <id>".')
+        return (New-MycoResult 3)
+    }
+
+    $wtArgs = New-MycoRecoverTabArgs -Candidates $candidates -Here $options.Here
+    try {
+        & wt @wtArgs
+    } catch {
+        Write-MycoError ('could not launch Windows Terminal: ' + $_.Exception.Message)
+        return (New-MycoResult 1)
+    }
+
+    $where = 'a new window'
+    if ($options.Here) { $where = 'this window' }
+    Write-MycoLine ('  Opened ' + $candidates.Count + ' tab(s) in ' + $where + '.') 'Green'
+    Write-MycoLine ''
+    return (New-MycoResult 0)
+}
+
+function Format-MycoHours {
+    param([double]$Hours)
+    if ([Math]::Abs($Hours - [Math]::Round($Hours)) -lt 0.001) {
+        $whole = [int][Math]::Round($Hours)
+        $unit = ' hours'
+        if ($whole -eq 1) { $unit = ' hour' }
+        return ([string]$whole + $unit)
+    }
+    return ($Hours.ToString('0.##', [System.Globalization.CultureInfo]::InvariantCulture) + ' hours')
+}
+
 function Show-MycoStatus {
     param([string]$Directory)
     $config = Read-MycoConfig
@@ -1140,6 +1418,7 @@ function Invoke-MycoCore {
             'list' { return (Show-MycoSessions) }
             'ls' { return (Show-MycoSessions) }
             'resume' { return (Invoke-MycoResume -Directory $directory -ResumeArgs $rest) }
+            'recover' { return (Invoke-MycoRecover -RecoverArgs $rest) }
             'status' { return (Show-MycoStatus -Directory $directory) }
             'config' { return (Invoke-MycoConfig -ConfigArgs $rest) }
             'forget' { return (Invoke-MycoForget -ForgetArgs $rest) }

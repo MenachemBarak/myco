@@ -101,6 +101,7 @@ never touched.
 | `myco continue [copilot args]` | Same, but runs `copilot --yolo --continue`. |
 | `myco sessions` | Lists every registered folder as a table, with its id, the last 15 sessions and which are running. Aliases: `ls`, `list`. |
 | `myco resume <id>` | Moves your shell into the folder and resumes. |
+| `myco recover [options]` | Reopens every session touched recently, one Windows Terminal tab each. |
 | `myco status` | Describes the current folder. |
 | `myco config [key] [value]` | Shows or changes `seed` and `maxSessions`. |
 | `myco forget <id>` | Removes a folder from the registry. The folder itself is left alone. |
@@ -114,7 +115,38 @@ myco start --model gpt-5.4
 myco continue --add-dir ..\shared
 ```
 
-## Ids
+## Getting a whole working set back
+
+After a crash, a reboot, or just closing the wrong window, `myco recover`
+reopens everything you had going — one Windows Terminal tab per session, each
+in its own project folder:
+
+```console
+> myco recover
+> myco recover --hours=6
+```
+
+The default window is the last two hours, measured from when each session was
+last updated.
+
+Sessions that are **still running are left alone**, because they did not need
+recovering and a second Copilot process on one session would contend for its
+state. `--all` reopens those too.
+
+| Option | Effect |
+| --- | --- |
+| `--hours=<n>` | How far back to look. Default 2. |
+| `--dry-run` | List what would open, and open nothing. |
+| `--all` | Include sessions that are still running. |
+| `--here` | Add the tabs to the current window instead of a new one. |
+| `--max=<n>` | Raise the tab cap. Default 12. |
+
+Each tab is resumed by its concrete session id, not by a list position, so a
+list that shifts underneath you cannot reopen the wrong conversation. Start
+with `--dry-run` if you want to see the set first.
+
+Windows Terminal is required for this one command; everything else in myco
+works without it.
 
 Folders get a three-digit id in the order you first use them: `001`, `002`, …
 Sessions are numbered inside their folder, most recently updated first, so

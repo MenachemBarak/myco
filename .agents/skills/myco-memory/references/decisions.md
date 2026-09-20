@@ -355,9 +355,108 @@ It scans `git ls-files` for machine-specific absolute paths.
 
 ---
 
-## 9. Housekeeping
+## 9. Recovering a working set
 
-### 9.1 Abandoned plan files are swept
+### 9.1 `myco recover` reopens recent sessions as Windows Terminal tabs
+
+One tab per session, each with the workspace as its working directory and the
+session name as its title.
+
+**Why.** Losing a terminal loses the whole working set, and reopening six
+projects by hand is tedious enough that people do not bother.
+
+**Measured.** The real `wt` accepts the exact argument vector myco builds:
+`-w new`, then `new-tab --title <name> -d <dir> <shell> -NoExit -Command <cmd>`
+segments chained with a literal `;` argument. Verified by launching real tabs
+and checking each landed in the right directory.
+
+### 9.2 The window is the last two hours, on `updated_at`
+
+Overridden with `--hours=<n>`, accepted in both `--hours=6` and `--hours 6`
+form, rejected with a clear message when it is not a positive number.
+
+### 9.3 Running sessions are skipped unless `--all`
+
+**Why.** They did not need recovering, and a second Copilot process on one
+session would contend for the same state and lock file. It also makes the
+command idempotent: running it twice does not double-open anything.
+
+**Consequence.** After a crash every process is gone, so everything recent is
+recovered — which is the case the command exists for.
+
+### 9.4 Tabs resume a concrete session id, never a list position
+
+**Why.** `001002` means "second in the current list" (see 3.3). Between
+building the list and the tab starting, that position could mean a different
+conversation. The uuid cannot drift.
+
+### 9.5 A tab dot-sources the launcher rather than trusting the profile
+
+Each tab runs `. '<install>\bin\myco.ps1'; myco resume <uuid>`, using `pwsh`
+when present and `-NoExit` so a failure stays on screen instead of the tab
+vanishing.
+
+**Why.** It works whether or not the user's profile integration is in place,
+and it reuses the tested resume path — which also sets `COPILOT_HOME` and
+records workspace usage — rather than reimplementing a launch.
+
+**Consequence.** The core has to know where its own `bin\myco.ps1` is, so
+`lib/myco-core.ps1` captures `$PSScriptRoot` at load time. That is correct for
+a dot-sourced file: it reports the dot-sourced file's own directory, verified
+from both entry points.
+
+### 9.6 A new window by default, `--here` to use the current one
+
+**Why.** Recovery produces a clean set of tabs instead of burying them among
+whatever is already open.
+
+### 9.7 A cap, and a dry run
+
+Default 12 tabs. Above it, myco lists the set, refuses, and names the exact
+`--max` value that would allow it. `--dry-run` lists and opens nothing.
+
+**Why.** Opening thirty terminal tabs by surprise is hostile, and an
+interactive confirmation would not work the same way across both shells.
+
+### 9.8 Missing Windows Terminal is explained, not crashed
+
+`wt` is only required by this one command, so the check happens when tabs are
+about to open, and the message offers `--dry-run` and `myco resume` instead.
+
+### 9.9 Testing it without opening windows
+
+A `wt.cmd` stub earlier on `PATH` shadows the real `wt.exe`, because PATH
+directory order is searched before PATHEXT extension order.
+
+**Measured**, before the suite was allowed to depend on it — getting this wrong
+would have opened real terminal windows on every test run.
+
+Absence cannot be shadowed, so the "Windows Terminal is missing" case runs on a
+reduced `PATH`. That in turn means driver shells are resolved to full paths
+before the harness narrows `PATH`, or the harness cannot start `pwsh` itself.
+
+---
+
+## 10. Session names
+
+### 10.1 YAML quoting is decoded
+
+Copilot writes the name in YAML single-quoted style, where an apostrophe is
+escaped by doubling it. myco strips the surrounding quotes and undoubles the
+apostrophes; double-quoted values get their backslash escapes undone.
+
+**Why it was missed.** The test fixture wrote names unquoted, so it was tidier
+than reality. A real session displayed as `what does ''active'' require`.
+`New-FakeSession` now quotes and escapes exactly as Copilot does.
+
+**Lesson, again.** A fixture that is cleaner than the real artefact hides real
+bugs — the same way the missing `copilot.ps1` stub did in 2.6.
+
+---
+
+## 11. Housekeeping
+
+### 11.1 Abandoned plan files are swept
 
 `myco-plan-*.cmd` fragments older than a day are removed from `TEMP` at startup;
 fresher ones are left alone in case another myco is mid-flight.
@@ -365,14 +464,14 @@ fresher ones are left alone in case another myco is mid-flight.
 **Why.** A `cmd.exe` run interrupted while the plan is executing never reaches
 its own cleanup.
 
-### 9.2 User-scope install, no administrator rights
+### 11.2 User-scope install, no administrator rights
 
 Copies to `%APPDATA%\.myco\app`, appends to the **user** `PATH`, and rewrites a
 single marked line in the PowerShell profiles.
 
 **Why idempotent.** Re-running the installer must not accumulate profile lines.
 
-### 9.3 PowerShell 5.1 compatibility is kept
+### 11.3 PowerShell 5.1 compatibility is kept
 
 No `if` used as an inline expression inside a larger expression, and no
 PS7-only operators.
