@@ -26,7 +26,7 @@ function Get-MycoLauncherPath {
     return (Join-Path (Split-Path -Parent $script:MycoLibRoot) 'bin\myco.ps1')
 }
 
-function Get-MycoVersion { '1.2.1' }
+function Get-MycoVersion { '1.3.0' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
@@ -221,6 +221,26 @@ function Read-MycoJsonFile {
     try { return ($raw | ConvertFrom-Json) } catch { return 'CORRUPT' }
 }
 
+function Move-MycoFileAtomic {
+    <#  Replaces Destination with Source as close to atomically as Windows
+        allows. File::Replace needs a real backup path: passing $null throws
+        "The path is empty" on PowerShell 7, which silently downgraded every
+        registry write to a plain copy. #>
+    param([string]$Source, [string]$Destination)
+    if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
+        [System.IO.File]::Move($Source, $Destination)
+        return
+    }
+    $backup = $Destination + '.myco-bak'
+    try {
+        [System.IO.File]::Replace($Source, $Destination, $backup)
+    } catch {
+        Move-Item -LiteralPath $Source -Destination $Destination -Force
+    } finally {
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Write-MycoJsonFile {
     param([string]$Path, $Value)
     $dir = Split-Path -Parent $Path
@@ -232,11 +252,7 @@ function Write-MycoJsonFile {
     $encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($tmp, $json, $encoding)
     try {
-        if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            [System.IO.File]::Replace($tmp, $Path, $null)
-        } else {
-            [System.IO.File]::Move($tmp, $Path)
-        }
+        Move-MycoFileAtomic -Source $tmp -Destination $Path
     } catch {
         Copy-Item -LiteralPath $tmp -Destination $Path -Force
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
@@ -604,6 +620,106 @@ function Initialize-MycoWorkspaceSeed {
 
 # --------------------------------------------------------------------- plan
 
+function Get-MycoJsonArraySpan {
+    <#  Locates the bounds of the array that follows a key, respecting string
+        literals so a bracket inside a path cannot end it early. Returns the
+        index of '[' and of its matching ']', or $null. #>
+    param([string]$Text, [string]$Key)
+    $match = [regex]::Match($Text, '"' + [regex]::Escape($Key) + '"\s*:\s*\[')
+    if (-not $match.Success) { return $null }
+
+    $open = $match.Index + $match.Length - 1
+    $depth = 0
+    $inString = $false
+    $escaped = $false
+    for ($i = $open; $i -lt $Text.Length; $i++) {
+        $ch = $Text[$i]
+        if ($inString) {
+            if ($escaped) { $escaped = $false }
+            elseif ($ch -eq '\') { $escaped = $true }
+            elseif ($ch -eq '"') { $inString = $false }
+            continue
+        }
+        if ($ch -eq '"') { $inString = $true; continue }
+        if ($ch -eq '[') { $depth++; continue }
+        if ($ch -eq ']') {
+            $depth--
+            if ($depth -eq 0) { return [pscustomobject]@{ Open = $open; Close = $i } }
+        }
+    }
+    return $null
+}
+
+function ConvertTo-MycoJsonString {
+    param([string]$Value)
+    return ($Value -replace '\\', '\\' -replace '"', '\"')
+}
+
+function Add-MycoTrustedFolder {
+    <#  Records the workspace in its own COPILOT_HOME as a trusted folder, so
+        Copilot does not greet every recovered tab with a trust prompt. Running
+        myco in a folder is the deliberate act of choosing it, and sessions are
+        launched with --yolo already.
+
+        The file belongs to Copilot, so it is edited surgically rather than
+        reparsed and rewritten: PowerShell 7 turns ISO date strings into
+        DateTime objects, and round-tripping would silently rewrite values such
+        as firstLaunchAt. Only the trustedFolders array is touched.
+
+        Failure is never fatal; the only cost is the prompt coming back. #>
+    param([string]$CopilotHome, [string]$Directory)
+    if (-not $CopilotHome -or -not $Directory) { return }
+    if (-not (Test-Path -LiteralPath $CopilotHome -PathType Container)) { return }
+
+    $path = Join-Path $CopilotHome 'config.json'
+    try {
+        $text = ''
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $text = [System.IO.File]::ReadAllText($path)
+        }
+
+        $entry = '"' + (ConvertTo-MycoJsonString $Directory) + '"'
+        $wanted = ConvertTo-MycoComparablePath $Directory
+        $updated = ''
+
+        $span = $null
+        if ($text.Trim()) { $span = Get-MycoJsonArraySpan -Text $text -Key 'trustedFolders' }
+
+        if ($span) {
+            $inner = $text.Substring($span.Open + 1, $span.Close - $span.Open - 1)
+            foreach ($m in [regex]::Matches($inner, '"((?:[^"\\]|\\.)*)"')) {
+                $existing = $m.Groups[1].Value -replace '\\\\', '\' -replace '\\"', '"'
+                if ((ConvertTo-MycoComparablePath $existing) -eq $wanted) { return }
+            }
+            $separator = ''
+            if ($inner.Trim()) { $separator = ',' }
+            # Insert after the last entry rather than before the bracket, so the
+            # comma does not end up alone on its own line.
+            $insertAt = $span.Close
+            while ($insertAt -gt ($span.Open + 1) -and [char]::IsWhiteSpace($text[$insertAt - 1])) { $insertAt-- }
+            $updated = $text.Substring(0, $insertAt) +
+            $separator + "`r`n    " + $entry + "`r`n  " +
+            $text.Substring($span.Close)
+        } elseif ($text.Trim() -and $text.Contains('{')) {
+            $brace = $text.IndexOf('{')
+            $updated = $text.Substring(0, $brace + 1) +
+            "`r`n  `"trustedFolders`": [`r`n    " + $entry + "`r`n  ]," +
+            $text.Substring($brace + 1)
+        } else {
+            $updated = '// User settings belong in settings.json.' + "`r`n" +
+            '// This file is managed automatically.' + "`r`n" +
+            '{' + "`r`n  `"trustedFolders`": [`r`n    " + $entry + "`r`n  ]`r`n}`r`n"
+        }
+
+        $tmp = $path + '.myco-tmp'
+        $encoding = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tmp, $updated, $encoding)
+        Move-MycoFileAtomic -Source $tmp -Destination $path
+    } catch {
+        Write-MycoWarning ('could not record the folder as trusted: ' + $_.Exception.Message)
+    }
+}
+
 function New-MycoPlan {
     param([string]$WorkDir, [string]$CopilotHome, [string[]]$CopilotArgs)
     return [pscustomobject]@{
@@ -754,6 +870,7 @@ function Invoke-MycoLaunch {
 
     $origin = if ($existed) { 'adopted' } else { 'created' }
     $workspace = Register-MycoWorkspace -Path $Directory -Origin $origin
+    Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $Directory
 
     $copilotArgs = @('--yolo')
     if ($Continue) { $copilotArgs += '--continue' }
@@ -969,6 +1086,7 @@ function Invoke-MycoResume {
     $copilotArgs += $extra
 
     Update-MycoWorkspaceUsage -Path $workspace.path
+    Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $workspace.path
     Write-MycoLine ('myco [' + $workspace.id + '] ' + (Split-Path -Leaf $workspace.path)) 'DarkCyan'
 
     return (New-MycoResult 0 (New-MycoPlan -WorkDir $workspace.path -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
@@ -986,6 +1104,7 @@ function Invoke-MycoResumeRaw {
     }
     $copilotArgs = @('--yolo', ('--resume=' + $Token)) + @($ExtraArgs)
     Update-MycoWorkspaceUsage -Path $Directory
+    Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $Directory
     return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
 }
 

@@ -97,6 +97,8 @@ breaking them.
   was written.** Do not simplify this back to "a lock file exists".
 - **`recover` resumes concrete session ids, never list positions**, never
   reopens a session that is already running, and reports how many it skipped.
+- **Each workspace folder is trusted in its own `.copilot`**, edited surgically
+  so Copilot's `config.json` is preserved byte for byte elsewhere.
 - **The Windows Terminal stub must stay first on `PATH` in tests.** Without it
   the suite opens real terminal windows.
 - **Nothing is emitted that the console cannot render**; glyphs degrade one

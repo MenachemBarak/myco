@@ -206,6 +206,10 @@ seeded.
 - Your home folder works like any other folder. Because `~\.copilot` is
   Copilot's default home, registering it simply reproduces normal Copilot
   behaviour; `myco status` points out when you are standing in it.
+- Each workspace folder is recorded as trusted in **its own** `.copilot`, so
+  recovered tabs resume instead of stopping on Copilot's folder-trust prompt.
+  Nothing is written to your global Copilot home, and the workspace's
+  `config.json` is edited surgically rather than rewritten.
 - Refuses to create a workspace at a drive root.
 - A folder is never seeded from itself.
 - `COPILOT_HOME` is restored after every session, in both shells.

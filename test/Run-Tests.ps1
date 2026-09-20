@@ -1435,9 +1435,14 @@ Describe 'trusted folders' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
         $raw = Get-Content -LiteralPath $cfgPath -Raw
         Assert-Match $raw '(?m)^//' 'the comment header must be kept'
-        $cfg = Get-CopilotConfig -CopilotHome $ch
-        Assert-Equal '2026-03-11T00:00:00.000Z' ([string]$cfg.firstLaunchAt) 'other keys must survive untouched'
-        Assert-True (@($cfg.askedSetupTerminals) -contains 'windows-terminal') 'arrays must survive as arrays'
+        # Asserted against the bytes on disk, not a parsed object: PowerShell 7
+        # turns an ISO date string into a DateTime when reading json, which
+        # would mask the very rewriting this test exists to catch.
+        Assert-Match $raw ([regex]::Escape('"firstLaunchAt": "2026-03-11T00:00:00.000Z"')) `
+            'other keys must survive byte for byte'
+        Assert-Match $raw ([regex]::Escape('"windows-terminal"')) 'unrelated arrays must survive'
+        $trusted = @(Get-TrustedFolders -CopilotHome $ch)
+        Assert-True ($trusted -contains $proj) 'the workspace must still be trusted'
     }
 
     It 'writes trustedFolders as a json array even with one entry' {

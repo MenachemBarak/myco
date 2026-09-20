@@ -460,6 +460,41 @@ than reality. A real session displayed as `what does ''active'' require`.
 **Lesson, again.** A fixture that is cleaner than the real artefact hides real
 bugs — the same way the missing `copilot.ps1` stub did in 2.6.
 
+### 10.2 myco trusts each workspace folder in its own `.copilot`
+
+Copilot asks *Confirm folder trust* the first time a session runs in a folder,
+and records the answer in `trustedFolders` inside that `COPILOT_HOME`'s
+`config.json`. Since every myco workspace has its own `COPILOT_HOME`, every
+workspace starts untrusted. That is one prompt per project for `start`, but
+`recover` opens many tabs at once and each would stop on its own prompt instead
+of resuming.
+
+**Why it is not an escalation.** Running myco in a folder is itself the
+deliberate act of choosing it, and sessions are launched with `--yolo` already.
+Only the workspace's own folder is trusted, only in that workspace's config,
+and never in the global Copilot home.
+
+**The file belongs to Copilot, so it is edited surgically.** It is JSON with a
+`//` comment header that `ConvertFrom-Json` cannot parse, and PowerShell 7
+turns ISO date strings into `DateTime` objects, so a parse-and-rewrite would
+silently rewrite values such as `firstLaunchAt`. Only the `trustedFolders`
+array is touched; everything else survives byte for byte, asserted against the
+bytes on disk rather than a parsed object.
+
+**Failure is never fatal.** If the edit cannot be made, myco warns and carries
+on; the only cost is the prompt coming back.
+
+### 10.3 Atomic replace needs a real backup path
+
+`File::Replace(source, destination, $null)` throws *The path is empty* on
+PowerShell 7. The registry writer had been catching that and falling back to a
+plain copy, so writes were quietly not atomic. Both writers now share
+`Move-MycoFileAtomic`, which passes a real backup path and deletes it
+afterwards.
+
+**Found by accident** while adding trusted folders, because that code path had
+no silent fallback to hide it.
+
 ---
 
 ## 11. Semicolons and Windows Terminal

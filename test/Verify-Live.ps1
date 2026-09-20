@@ -148,6 +148,17 @@ try {
         throw 'cannot continue without a seeded session'
     }
 
+    # Without this the recovered tab stops on Copilot's folder-trust prompt
+    # instead of resuming, which is invisible to the stubbed suite.
+    $configPath = Join-Path $workspace '.copilot\config.json'
+    $configText = ''
+    if (Test-Path -LiteralPath $configPath) { $configText = Get-Content -LiteralPath $configPath -Raw }
+    if ($configText -and $configText.Contains(($workspace -replace '\\', '\\'))) {
+        Write-Pass 'the workspace was recorded as a trusted folder, so no prompt blocks the tab'
+    } else {
+        Write-Fail 'the workspace was not recorded as trusted; recovered tabs will stop on a prompt'
+    }
+
     # -------------------------------------------------------- recover for real
 
     Write-Step 'running the real "myco recover"...'
