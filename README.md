@@ -129,15 +129,20 @@ in its own project folder:
 The default window is the last two hours, measured from when each session was
 last updated.
 
-Sessions that are **still running are left alone**, because they did not need
-recovering and a second Copilot process on one session would contend for its
-state. `--all` reopens those too.
+Sessions that are **still running are never reopened**. They did not need
+recovering, and a second Copilot process on one session would contend for the
+same session state. The report always says how many were left alone, so a short
+list is never a mystery:
+
+```text
+  Would recover 2 session(s) from the last 2 hours
+  6 sessions are still running and already open, so left alone.
+```
 
 | Option | Effect |
 | --- | --- |
 | `--hours=<n>` | How far back to look. Default 2. |
 | `--dry-run` | List what would open, and open nothing. |
-| `--all` | Include sessions that are still running. |
 | `--here` | Add the tabs to the current window instead of a new one. |
 | `--max=<n>` | Raise the tab cap. Default 12. |
 

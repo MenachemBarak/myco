@@ -55,8 +55,8 @@ Do not read all three speculatively. Each is self-contained.
 
 `recover` reopens every session touched in a window — two hours by default,
 `--hours=<n>` to change — as one Windows Terminal tab each. It is the only
-command that needs `wt`, and it skips sessions that are still running unless
-given `--all`.
+command that needs `wt`. It never reopens a session that already has a live
+Copilot process, and always reports how many it left alone.
 
 ## Repository map
 
@@ -95,8 +95,8 @@ breaking them.
   itself.
 - **Active means a process genuinely exists and started no later than its lock
   was written.** Do not simplify this back to "a lock file exists".
-- **`recover` resumes concrete session ids, never list positions**, and skips
-  sessions that are still running unless asked otherwise.
+- **`recover` resumes concrete session ids, never list positions**, never
+  reopens a session that is already running, and reports how many it skipped.
 - **The Windows Terminal stub must stay first on `PATH` in tests.** Without it
   the suite opens real terminal windows.
 - **Nothing is emitted that the console cannot render**; glyphs degrade one

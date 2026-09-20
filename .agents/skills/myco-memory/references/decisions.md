@@ -375,14 +375,22 @@ and checking each landed in the right directory.
 Overridden with `--hours=<n>`, accepted in both `--hours=6` and `--hours 6`
 form, rejected with a clear message when it is not a positive number.
 
-### 9.3 Running sessions are skipped unless `--all`
+### 9.3 A running session is never reopened, and the skip is reported
 
-**Why.** They did not need recovering, and a second Copilot process on one
-session would contend for the same state and lock file. It also makes the
+**Why.** It did not need recovering, and a second Copilot process on one
+session would contend for the same state and lock file. Skipping also makes the
 command idempotent: running it twice does not double-open anything.
 
 **Consequence.** After a crash every process is gone, so everything recent is
 recovered — which is the case the command exists for.
+
+**Corrected in 1.2.1.** The first release skipped silently and offered `--all`
+to reopen running sessions anyway. On a real machine with eight chats open,
+`recover --dry-run` listed two with no explanation, and the output looked like
+a bug rather than a decision. The count of sessions left alone is now always
+reported, and `--all` was removed: reopening a live session is precisely what
+recover must not do, so it should not sit one flag away. The option now fails
+with a message explaining why, rather than being silently ignored.
 
 ### 9.4 Tabs resume a concrete session id, never a list position
 

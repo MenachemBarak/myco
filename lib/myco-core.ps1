@@ -26,7 +26,7 @@ function Get-MycoLauncherPath {
     return (Join-Path (Split-Path -Parent $script:MycoLibRoot) 'bin\myco.ps1')
 }
 
-function Get-MycoVersion { '1.2.0' }
+function Get-MycoVersion { '1.2.1' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
@@ -699,9 +699,9 @@ function Show-MycoHelp {
     Write-MycoLine '                                 2 hours, one Windows Terminal tab each.'
     Write-MycoLine '                                 --hours=<n>  widen or narrow the window'
     Write-MycoLine '                                 --dry-run    list them without opening'
-    Write-MycoLine '                                 --all        include still-running sessions'
     Write-MycoLine '                                 --here       add tabs to this window'
     Write-MycoLine '                                 --max=<n>    raise the tab cap'
+    Write-MycoLine '                                 Sessions already running are left alone.'
     Write-MycoLine '  myco status                    Describe the current folder.'
     Write-MycoLine '  myco config [key] [value]      Show or change settings (seed, maxSessions).'
     Write-MycoLine '  myco forget <id>               Drop a folder from the registry only.'
@@ -1000,7 +1000,6 @@ function Read-MycoRecoverOptions {
         Hours     = Get-MycoDefaultRecoverHours
         Max       = Get-MycoDefaultRecoverMax
         DryRun    = $false
-        All       = $false
         Here      = $false
         Error     = ''
     }
@@ -1051,11 +1050,16 @@ function Read-MycoRecoverOptions {
                 $options.Max = $parsed
             }
             '--dry-run' { $options.DryRun = $true }
-            '--all' { $options.All = $true }
             '--here' { $options.Here = $true }
+            '--all' {
+                $options.Error = ('--all is no longer accepted. recover never reopens a session that ' +
+                    'already has a live Copilot process, because a second process would contend for ' +
+                    'the same session. Use "myco sessions" to see them, or "myco resume <id>".')
+                return $options
+            }
             default {
                 $options.Error = ('unknown option "' + $arg +
-                    '". recover accepts --hours, --max, --dry-run, --all and --here.')
+                    '". recover accepts --hours, --max, --dry-run and --here.')
                 return $options
             }
         }
@@ -1065,12 +1069,14 @@ function Read-MycoRecoverOptions {
 
 function Get-MycoRecoverCandidates {
     <#  Every session across every workspace that was touched inside the window,
-        newest first. Sessions with a live process are left out unless asked
-        for: they did not need recovering, and a second process on one session
-        would contend for its state. #>
-    param($Registry, [double]$Hours, [bool]$IncludeRunning, [int]$PerWorkspace)
+        newest first, together with a count of those left alone because they
+        are still running. A session with a live Copilot process is never
+        reopened: it did not need recovering, and a second process would
+        contend for the same session state. #>
+    param($Registry, [double]$Hours, [int]$PerWorkspace)
     $cutoff = [DateTime]::UtcNow.AddHours(-$Hours)
     $found = New-Object System.Collections.ArrayList
+    $running = 0
 
     foreach ($workspace in @($Registry.workspaces)) {
         if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) { continue }
@@ -1079,7 +1085,7 @@ function Get-MycoRecoverCandidates {
         foreach ($session in $sessions) {
             $index++
             if ($session.UpdatedAt.ToUniversalTime() -lt $cutoff) { continue }
-            if ($session.Active -and -not $IncludeRunning) { continue }
+            if ($session.Active) { $running++; continue }
             [void]$found.Add([pscustomobject]@{
                     WorkspaceId = $workspace.id
                     Path        = $workspace.path
@@ -1087,12 +1093,14 @@ function Get-MycoRecoverCandidates {
                     SessionId   = $session.Id
                     Name        = $session.Name
                     UpdatedAt   = $session.UpdatedAt
-                    Active      = $session.Active
                 })
         }
     }
 
-    return @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
+    return [pscustomobject]@{
+        Sessions = @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
+        Running  = $running
+    }
 }
 
 function Get-MycoTabShell {
@@ -1164,18 +1172,24 @@ function Invoke-MycoRecover {
     }
 
     $config = Read-MycoConfig
-    $candidates = @(Get-MycoRecoverCandidates -Registry $registry -Hours $options.Hours `
-            -IncludeRunning $options.All -PerWorkspace $config.maxSessions)
+    $scan = Get-MycoRecoverCandidates -Registry $registry -Hours $options.Hours `
+        -PerWorkspace $config.maxSessions
+    $candidates = @($scan.Sessions)
+    $running = [int]$scan.Running
 
     $glyphs = Get-MycoGlyphSet
     $window = Format-MycoHours $options.Hours
+    $runningNote = ''
+    if ($running -gt 0) {
+        $word = 'sessions are'
+        if ($running -eq 1) { $word = 'session is' }
+        $runningNote = '  ' + $running + ' ' + $word + ' still running and already open, so left alone.'
+    }
 
     if ($candidates.Count -eq 0) {
         Write-MycoLine ''
         Write-MycoLine ('  Nothing to recover from the last ' + $window + '.') 'Cyan'
-        if (-not $options.All) {
-            Write-MycoLine '  Sessions that are still running are left alone; add --all to reopen them too.' 'DarkGray'
-        }
+        if ($runningNote) { Write-MycoLine $runningNote 'DarkGray' }
         Write-MycoLine ''
         return (New-MycoResult 0)
     }
@@ -1184,18 +1198,17 @@ function Invoke-MycoRecover {
     $verb = 'Recovering'
     if ($options.DryRun) { $verb = 'Would recover' }
     Write-MycoLine ('  ' + $verb + ' ' + $candidates.Count + ' session(s) from the last ' + $window) 'Cyan'
+    if ($runningNote) { Write-MycoLine $runningNote 'DarkGray' }
     Write-MycoLine ''
     foreach ($candidate in $candidates) {
         $name = $candidate.Name
         if (-not $name) { $name = '(unnamed)' }
-        $flag = ''
-        if ($candidate.Active) { $flag = '  ' + [string]$glyphs.Dot + ' running' }
         $folder = Split-Path -Leaf $candidate.Path
         $nameWidth = (Get-MycoConsoleWidth) - 34 - $folder.Length
         if ($nameWidth -lt 16) { $nameWidth = 16 }
         Write-MycoLine ('   ' + [string]$glyphs.Separator + ' ' + $candidate.ShortId + '  ' +
             (Format-MycoCell (Format-MycoRelativeTime $candidate.UpdatedAt) 12) + '  ' +
-            $folder + '  ' + (Format-MycoCell $name $nameWidth $glyphs.Ellipsis).TrimEnd() + $flag)
+            $folder + '  ' + (Format-MycoCell $name $nameWidth $glyphs.Ellipsis).TrimEnd())
     }
     Write-MycoLine ''
 
