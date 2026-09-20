@@ -10,13 +10,19 @@ CLI workspace by pointing `COPILOT_HOME` at `<project>\.copilot`.
 
 ## Read before acting
 
-- `AGENTS.md` — architecture, invariants, the working agreement.
-- `docs/DECISIONS.md` — every decision, its rationale, and what breaks if
-  reversed. Check here before overturning anything that looks odd; several
-  oddities are load-bearing and were settled by measurement.
-- `.agents/skills/myco-shell-traps/SKILL.md` — before touching entry points,
-  argument forwarding, generated batch, rendering or liveness.
-- `.agents/skills/myco-maintenance/SKILL.md` — the test and release loop.
+Your memory for this project is the `myco-memory` skill, in
+`.agents/skills/myco-memory/`. Load `SKILL.md` first — it carries the
+architecture, the repository map, the invariants and the working agreement.
+Then pull in only what the task needs:
+
+- `references/shell-traps.md` — before touching the entry points, argument
+  forwarding, generated batch, rendering, terminal width or liveness.
+- `references/maintenance.md` — the test harness, the verification loop,
+  installing and releasing.
+- `references/decisions.md` — before overturning anything that looks odd.
+  Several oddities are load-bearing and were settled by measurement.
+
+`AGENTS.md` at the repository root is a short pointer to the same material.
 
 ## How you work
 

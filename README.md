@@ -203,16 +203,20 @@ your real Copilot home.
 
 ## Maintaining myco, with or without an agent
 
-The project carries its own handoff, so an agent or a new contributor can pick
-it up cold:
+The project carries its own memory, so an agent or a new contributor can pick it
+up cold. It all lives in one skill, `.agents/skills/myco-memory/`:
 
 | File | What it holds |
 | --- | --- |
-| [`AGENTS.md`](AGENTS.md) | Architecture, invariants, the working agreement. Read by Copilot, Codex, Cursor, Gemini and other agentic tools. |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Every design decision, its rationale, and what breaks if it is reversed. |
-| `.agents/skills/myco-shell-traps/` | The Windows dual-shell traps behind those decisions, each one from a real failure. |
-| `.agents/skills/myco-maintenance/` | The test, verification and release loop. |
-| `.github/agents/myco-maintainer.agent.md` | A Copilot CLI agent preloaded with all of the above. |
+| `SKILL.md` | Architecture, repository map, invariants, the working agreement. |
+| `references/decisions.md` | Every design decision, its rationale, and what breaks if it is reversed. |
+| `references/shell-traps.md` | The Windows dual-shell traps behind those decisions, each from a real failure. |
+| `references/maintenance.md` | The test, verification and release loop. |
+
+[`AGENTS.md`](AGENTS.md) at the root is a short pointer to the same material,
+for tools that read it but do not support skills.
+[`.github/agents/myco-maintainer.agent.md`](.github/agents/myco-maintainer.agent.md)
+is a Copilot CLI agent wired to the skill.
 
 `.agents/skills/` is the tool-neutral location for skills; the Copilot CLI reads
 it alongside `.github/skills/` and `.claude/skills/`. Project *agents* are read

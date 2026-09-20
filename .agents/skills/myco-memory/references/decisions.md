@@ -1,7 +1,11 @@
 # Decisions
 
+Part of the `myco-memory` skill. Load before overturning anything that looks
+odd, before changing seeding, liveness, rendering or the registry, and whenever
+you need the reasoning behind a design rather than its mechanics.
+
 Every decision that shaped myco, why it was made, and what breaks if it is
-reversed. Newest section last within each area. Read `AGENTS.md` first.
+reversed. Read `SKILL.md` first.
 
 A decision marked **measured** was settled by running something on a real
 machine rather than by reasoning about it.

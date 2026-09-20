@@ -1,16 +1,10 @@
----
-name: myco-shell-traps
-description: >
-  Windows dual-shell traps for CLI tools that must work in both PowerShell and cmd.exe, each
-  one verified by a real failure in the myco project. Use when writing or debugging PowerShell
-  or cmd entry points, forwarding arguments to another CLI, generating batch files, changing
-  the caller's working directory, rendering box-drawing or non-ascii output to a console,
-  measuring terminal width, detecting whether a process is still running, or writing tests that
-  drive real shells. Read before touching bin/myco.ps1, bin/myco.cmd, lib/myco-run.ps1 or the
-  rendering and liveness code in lib/myco-core.ps1.
----
-
 # Windows dual-shell traps
+
+Part of the `myco-memory` skill. Load when writing or debugging the PowerShell
+or `cmd.exe` entry points, forwarding arguments to another CLI, generating
+batch files, changing the caller's working directory, rendering to a console,
+measuring terminal width, detecting whether a process is alive, or writing
+tests that drive real shells.
 
 Each trap below caused a real, observed failure. They are easy to reintroduce
 because the wrong version usually looks right and often half-works.

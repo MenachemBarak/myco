@@ -1,19 +1,10 @@
----
-name: myco-maintenance
-description: >
-  The working loop for the myco repository: how to run the end-to-end suite across
-  powershell.exe, pwsh.exe and cmd.exe, how to add a test to the sandboxed harness, the
-  test-first commit discipline the git history follows, how to verify a change against the real
-  Copilot CLI instead of the stub, how to install and release a version, and how to experiment
-  without leaving debris in a real myco registry. Use for any change to myco, for adding or
-  debugging its tests, or before tagging a release.
----
-
 # Maintaining myco
 
-Read `AGENTS.md` first for the architecture and invariants, and
-`docs/DECISIONS.md` for why anything is the way it is. This skill is the
-mechanics.
+Part of the `myco-memory` skill. Load for any change to myco, for adding or
+debugging its tests, or before tagging a release.
+
+`SKILL.md` holds the architecture and invariants, and `decisions.md` explains
+why anything is the way it is. This file is the mechanics.
 
 ## The loop
 
@@ -71,7 +62,7 @@ Rules:
   `New-Sandbox`.
 - Assert behaviour a user could notice, not internal shape.
 - Anything about processes, encodings or shells must be driven through the real
-  thing. Mocking those tests the mock — see `docs/DECISIONS.md` 8.4.
+  thing. Mocking those tests the mock — see `decisions.md` 8.4.
 
 ## Verify against the real CLI
 
