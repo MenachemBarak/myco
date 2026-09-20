@@ -85,6 +85,7 @@ function Describe {
 # ------------------------------------------------------------------- sandbox
 
 function New-Sandbox {
+    param([switch]$WithoutWindowsTerminal)
     $root = Join-Path $script:SandboxRoot ([guid]::NewGuid().ToString('N').Substring(0, 8))
     $userProfile = Join-Path $root 'userprofile'
     $mycoHome = Join-Path $root 'mycohome'
@@ -96,6 +97,7 @@ function New-Sandbox {
     }
 
     $log = Join-Path $root 'copilot-calls.log'
+    $wtLog = Join-Path $root 'wt-calls.log'
 
     # Recording stub that impersonates the copilot CLI. Arguments are recorded
     # one per line as well as verbatim, so an entry point that collapses them
@@ -130,6 +132,32 @@ exit 0
 '@
     Set-Content -LiteralPath (Join-Path $stubBin 'copilot.ps1') -Value $stubPs1 -Encoding UTF8
 
+    # Stands in for Windows Terminal. A stub earlier on PATH shadows the real
+    # wt.exe, so the suite never opens a window. Omitted when a test needs to
+    # exercise the "Windows Terminal is not installed" path, which is also why
+    # that case runs on a reduced PATH.
+    if (-not $WithoutWindowsTerminal) {
+        $stubWt = @'
+@echo off
+>>"%MYCO_TEST_WT_LOG%" echo [call]
+:myco_wt_loop
+if "%~1"=="" goto :myco_wt_done
+>>"%MYCO_TEST_WT_LOG%" echo arg=%~1
+shift
+goto :myco_wt_loop
+:myco_wt_done
+exit /b 0
+'@
+        Set-Content -LiteralPath (Join-Path $stubBin 'wt.cmd') -Value $stubWt -Encoding ASCII
+    }
+
+    $minimalPath = ''
+    if ($WithoutWindowsTerminal) {
+        $system32 = Join-Path $env:SystemRoot 'System32'
+        $minimalPath = ($stubBin + ';' + $system32 + ';' +
+            (Join-Path $system32 'WindowsPowerShell\v1.0'))
+    }
+
     [pscustomobject]@{
         Root        = $root
         UserProfile = $userProfile
@@ -138,7 +166,30 @@ exit 0
         Projects    = $projects
         Temp        = $temp
         Log         = $log
+        WtLog       = $wtLog
+        MinimalPath = $minimalPath
     }
+}
+
+function Get-WtArgs {
+    <#  The argument list Windows Terminal was invoked with, in order. #>
+    param($Sandbox)
+    if (-not (Test-Path -LiteralPath $Sandbox.WtLog)) { return @() }
+    $list = New-Object System.Collections.ArrayList
+    foreach ($line in (Get-Content -LiteralPath $Sandbox.WtLog)) {
+        if ($line -match '^arg=(.*)$') { [void]$list.Add($Matches[1]) }
+    }
+    return $list.ToArray()
+}
+
+function Test-WtLaunched {
+    param($Sandbox)
+    return (Test-Path -LiteralPath $Sandbox.WtLog)
+}
+
+function Get-WtTabCount {
+    param($Sandbox)
+    return @(Get-WtArgs -Sandbox $Sandbox | Where-Object { $_ -eq 'new-tab' }).Count
 }
 
 function New-Project {
@@ -329,7 +380,7 @@ function Invoke-Myco {
     }
 
     $saved = @{}
-    foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'PATH', 'COPILOT_HOME', 'TEMP', 'TMP') {
+    foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'MYCO_TEST_WT_LOG', 'PATH', 'COPILOT_HOME', 'TEMP', 'TMP') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
     }
     $previousErrorAction = $ErrorActionPreference
@@ -340,10 +391,15 @@ function Invoke-Myco {
         $env:MYCO_HOME = $Sandbox.MycoHome
         $env:USERPROFILE = $Sandbox.UserProfile
         $env:MYCO_TEST_LOG = $Sandbox.Log
+        $env:MYCO_TEST_WT_LOG = $Sandbox.WtLog
         $env:COPILOT_HOME = ''
         $env:TEMP = $Sandbox.Temp
         $env:TMP = $Sandbox.Temp
-        $env:PATH = $Sandbox.StubBin + ';' + $saved['PATH']
+        if ($Sandbox.MinimalPath) {
+            $env:PATH = $Sandbox.MinimalPath
+        } else {
+            $env:PATH = $Sandbox.StubBin + ';' + $saved['PATH']
+        }
         & $runner
     } finally {
         $ErrorActionPreference = $previousErrorAction
@@ -841,6 +897,197 @@ Describe 'myco resume' {
         $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001')
         Assert-Match $r.Output '(?i)(missing|not found|no longer)' 'must report the vanished folder'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
+    }
+}
+
+Describe 'myco recover' {
+
+    It 'opens one Windows Terminal tab per session from the last two hours' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Recent one' -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = New-FakeSession -CopilotHome $ch -Name 'Recent two' -UpdatedAt (Get-Date).AddMinutes(-90)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-True (Test-WtLaunched -Sandbox $sb) ("Windows Terminal must be launched. Output:`n" + $r.Output)
+        Assert-Equal 2 (Get-WtTabCount -Sandbox $sb) 'one tab per recovered session'
+    }
+
+    It 'gives each tab the workspace folder and the exact session id' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $target = New-FakeSession -CopilotHome $ch -Name 'Recent one' -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        $wtArgs = @(Get-WtArgs -Sandbox $sb)
+        Assert-True ($wtArgs -contains $proj) ('the workspace folder must be passed, args: ' + ($wtArgs -join ' | '))
+        $joined = $wtArgs -join ' '
+        Assert-Match $joined ([regex]::Escape($target)) 'the concrete session id must be resumed, not a position'
+    }
+
+    It 'titles each tab with the session name' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Fix the login loop' `
+            -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        $wtArgs = @(Get-WtArgs -Sandbox $sb)
+        Assert-True ($wtArgs -contains 'Fix the login loop') `
+            ('the session name must be the tab title, args: ' + ($wtArgs -join ' | '))
+    }
+
+    It 'leaves out sessions older than the window' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Inside window' -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = New-FakeSession -CopilotHome $ch -Name 'Way too old' -UpdatedAt (Get-Date).AddHours(-9)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) 'only the recent session may be recovered'
+        Assert-NoMatch ((Get-WtArgs -Sandbox $sb) -join ' ') 'Way too old' 'the old session must not appear'
+    }
+
+    It 'widens the window with --hours' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Inside window' -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = New-FakeSession -CopilotHome $ch -Name 'Five hours back' -UpdatedAt (Get-Date).AddHours(-5)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--hours=8')
+        Assert-Equal 2 (Get-WtTabCount -Sandbox $sb) '--hours=8 must reach back five hours'
+    }
+
+    It 'accepts --hours as a separate argument' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Five hours back' -UpdatedAt (Get-Date).AddHours(-5)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--hours', '8')
+        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) '--hours 8 must be accepted in the spaced form'
+    }
+
+    It 'rejects a nonsense --hours value' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--hours=soon')
+        Assert-Match $r.Output '(?i)hours' 'must name the offending option'
+        Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
+        Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'nothing may be launched'
+    }
+
+    It 'skips sessions that are already running' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $live = Start-TestProcess
+        $null = New-FakeSession -CopilotHome $ch -Name 'Still running' -UpdatedAt (Get-Date).AddMinutes(-5) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
+        $null = New-FakeSession -CopilotHome $ch -Name 'Needs recovery' -UpdatedAt (Get-Date).AddMinutes(-6)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) 'a session with a live process does not need recovering'
+        Assert-NoMatch ((Get-WtArgs -Sandbox $sb) -join ' ') 'Still running' 'the live session must be skipped'
+    }
+
+    It 'includes running sessions with --all' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        $live = Start-TestProcess
+        $null = New-FakeSession -CopilotHome $ch -Name 'Still running' -UpdatedAt (Get-Date).AddMinutes(-5) `
+            -Active -LockPid $live.Id -LockWrittenAt $live.StartTime.AddSeconds(1)
+        $null = New-FakeSession -CopilotHome $ch -Name 'Needs recovery' -UpdatedAt (Get-Date).AddMinutes(-6)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--all')
+        Assert-Equal 2 (Get-WtTabCount -Sandbox $sb) '--all must reopen running sessions too'
+    }
+
+    It 'spans every workspace, not just the current folder' {
+        $sb = New-Sandbox
+        $a = New-Project -Sandbox $sb -Name 'alpha'
+        $b = New-Project -Sandbox $sb -Name 'beta'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $a '.copilot') -Name 'From alpha' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $null = New-FakeSession -CopilotHome (Join-Path $b '.copilot') -Name 'From beta' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('recover')
+        $joined = (Get-WtArgs -Sandbox $sb) -join ' '
+        Assert-Equal 2 (Get-WtTabCount -Sandbox $sb) 'both workspaces must contribute'
+        Assert-Match $joined 'From alpha' 'the first workspace must be represented'
+        Assert-Match $joined 'From beta' 'the second workspace must be represented'
+    }
+
+    It 'previews without launching anything under --dry-run' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Would reopen' `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
+        Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'a dry run must not launch Windows Terminal'
+        Assert-Match $r.Output 'Would reopen' 'a dry run must list what it would open'
+        Assert-Equal '0' $r.ExitCode 'a dry run is not an error'
+    }
+
+    It 'refuses to open more tabs than the cap' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $ch = Join-Path $proj '.copilot'
+        for ($i = 1; $i -le 4; $i++) {
+            $null = New-FakeSession -CopilotHome $ch -Name ("Session $i") -UpdatedAt (Get-Date).AddMinutes(-$i)
+        }
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--max=3')
+        Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'nothing may open when the cap is exceeded'
+        Assert-Match $r.Output '(?i)--max' 'must say how to raise the cap'
+        Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
+    }
+
+    It 'says so when nothing needs recovering' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Ancient' -UpdatedAt (Get-Date).AddDays(-3)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-Match $r.Output '(?i)nothing to recover|no sessions' 'must report an empty result plainly'
+        Assert-Equal '0' $r.ExitCode 'an empty result is not an error'
+        Assert-True (-not (Test-WtLaunched -Sandbox $sb)) 'nothing may be launched'
+    }
+
+    It 'explains itself when Windows Terminal is missing' {
+        $sb = New-Sandbox -WithoutWindowsTerminal
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-Match $r.Output '(?i)windows terminal' 'must name the missing dependency'
+        Assert-Match $r.Output '(?i)--dry-run|myco resume' 'must offer a way forward'
+        Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
+    }
+
+    It 'is documented in help' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @()
+        Assert-Match $r.Output 'myco recover' 'help must document recover'
+    }
+
+    It 'works from cmd.exe too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover') -Shell cmd
+        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) 'cmd.exe must be able to recover too'
     }
 }
 
