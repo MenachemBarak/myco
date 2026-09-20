@@ -948,8 +948,50 @@ Describe 'myco recover' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
         $wtArgs = @(Get-WtArgs -Sandbox $sb)
         Assert-True ($wtArgs -contains $proj) ('the workspace folder must be passed, args: ' + ($wtArgs -join ' | '))
-        $joined = $wtArgs -join ' '
-        Assert-Match $joined ([regex]::Escape($target)) 'the concrete session id must be resumed, not a position'
+        Assert-True ($wtArgs -contains $target) `
+            ('the session uuid must be its own argument, args: ' + ($wtArgs -join ' | '))
+    }
+
+    It 'passes no argument containing a semicolon to Windows Terminal' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
+            -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        # wt splits its whole command line on ';' regardless of argv boundaries,
+        # so a semicolon inside any argument silently starts another tab.
+        $offenders = @(Get-WtArgs -Sandbox $sb | Where-Object { $_ -ne ';' -and $_.Contains(';') })
+        Assert-Equal 0 $offenders.Count `
+            ('no argument may carry a semicolon, found: ' + (($offenders | ForEach-Object { "<$_>" }) -join ' '))
+    }
+
+    It 'survives a session name containing a semicolon' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Fix this; then that' `
+            -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        Assert-Equal 1 (Get-WtTabCount -Sandbox $sb) 'a semicolon in a name must not conjure a second tab'
+        $offenders = @(Get-WtArgs -Sandbox $sb | Where-Object { $_ -ne ';' -and $_.Contains(';') })
+        Assert-Equal 0 $offenders.Count `
+            ('the title must be sanitised, found: ' + (($offenders | ForEach-Object { "<$_>" }) -join ' '))
+    }
+
+    It 'starts each tab from a script file rather than an inline command' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
+            -UpdatedAt (Get-Date).AddMinutes(-10)
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
+        $wtArgs = @(Get-WtArgs -Sandbox $sb)
+        # -File needs no statement separator, which is what keeps the command
+        # free of the semicolon wt would split on.
+        Assert-True ($wtArgs -contains '-File') ('the launcher must be run with -File, args: ' + ($wtArgs -join ' | '))
+        Assert-True (-not ($wtArgs -contains '-Command')) 'an inline -Command payload must not be used'
+        Assert-True ($wtArgs -contains 'resume') 'resume must be passed as its own argument'
     }
 
     It 'titles each tab with the session name' {
