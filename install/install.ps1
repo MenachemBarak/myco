@@ -125,6 +125,6 @@ if (-not (Get-Command copilot -ErrorAction SilentlyContinue)) {
 Write-Host ''
 Write-Host 'Done. Open a new terminal, then try:' -ForegroundColor Green
 Write-Host '  cd <your project>'
-Write-Host '  myco start'
+Write-Host '  myco start <name>'
 Write-Host '  myco sessions'
 Write-Host ''
