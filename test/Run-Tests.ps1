@@ -829,6 +829,23 @@ Describe 'myco continue' {
 
 Describe 'myco sessions' {
 
+    It 'ignores the bookkeeping folder the real CLI keeps beside its sessions' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        # The real Copilot CLI puts .session-operation-locks in session-state,
+        # alongside the sessions themselves. It is not a session and has no
+        # workspace.yaml, but it is newer than everything else, so left alone
+        # it both appears in the table and takes the first id.
+        New-Item -ItemType Directory -Force -Path (Join-Path $ch 'session-state\.session-operation-locks') | Out-Null
+        $null = New-FakeSession -CopilotHome $ch -Name 'Real work' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output 'session-operation-locks' 'the lock folder must never be listed as a session'
+        Assert-NoMatch $r.Output '\(unnamed\)' 'the lock folder must not show up as a nameless session'
+        Assert-Match $r.Output '001001[^\r\n]*Real work' 'the real session must keep the first id'
+    }
+
     It 'nests session ids under their workspace id' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
