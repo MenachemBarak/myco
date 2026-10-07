@@ -345,12 +345,22 @@ function Read-MycoRegistry {
             if (($wNames -contains 'createdAt') -and $w.createdAt) { $createdAt = [string]$w.createdAt }
             $lastUsedAt = ''
             if (($wNames -contains 'lastUsedAt') -and $w.lastUsedAt) { $lastUsedAt = [string]$w.lastUsedAt }
+            # The counter behind session ids. A registry written before named
+            # sessions existed simply has no value yet, and starts at one.
+            $nextSession = 1
+            if ($wNames -contains 'nextSession') {
+                $parsedNext = 0
+                if ([int]::TryParse([string]$w.nextSession, [ref]$parsedNext) -and $parsedNext -gt 0) {
+                    $nextSession = $parsedNext
+                }
+            }
             [void]$workspaces.Add([pscustomobject]@{
-                    id         = [string]$w.id
-                    path       = [string]$w.path
-                    origin     = $origin
-                    createdAt  = $createdAt
-                    lastUsedAt = $lastUsedAt
+                    id          = [string]$w.id
+                    path        = [string]$w.path
+                    origin      = $origin
+                    createdAt   = $createdAt
+                    lastUsedAt  = $lastUsedAt
+                    nextSession = $nextSession
                 })
         }
     }
@@ -388,6 +398,43 @@ function Format-MycoWorkspaceId {
     return ([string]$Number)
 }
 
+function Format-MycoSessionId {
+    param([string]$WorkspaceId, [int]$Number)
+    return ([string]$WorkspaceId + ('{0:000}' -f $Number))
+}
+
+function ConvertTo-MycoSlug {
+    <#  Turns the name the user typed into the lowercase dashed form that goes
+        into a session id. Returns an empty string when nothing usable is left,
+        which the caller reports rather than inventing a name. #>
+    param([string]$Name, [int]$MaxLength = 32)
+    if (-not $Name) { return '' }
+    $slug = $Name.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+    $slug = $slug.Trim('-')
+    if ($slug.Length -gt $MaxLength) { $slug = $slug.Substring(0, $MaxLength).Trim('-') }
+    return $slug
+}
+
+<#  A session myco started carries its own id at the end of its name, which is
+    the whole reason that id never shifts: it lives with the session rather
+    than being recomputed from a list position every time. The match is
+    case-sensitive on purpose, so only the slug form myco writes is recognised
+    and a Copilot summary that happens to end in six digits is left alone. #>
+$script:MycoNamedSessionPattern = '^(?<slug>[a-z0-9]+(?:-[a-z0-9]+)*)-(?<id>\d{6})$'
+
+function Get-MycoNamedSessionId {
+    param([string]$Name)
+    if ($Name -cmatch $script:MycoNamedSessionPattern) { return $Matches['id'] }
+    return ''
+}
+
+function Get-MycoNamedSessionLabel {
+    <#  The name without the id myco appended, so the id is not printed twice. #>
+    param([string]$Name)
+    if ($Name -cmatch $script:MycoNamedSessionPattern) { return $Matches['slug'] }
+    return $Name
+}
+
 function Find-MycoWorkspaceById {
     param($Registry, [string]$Id)
     $wanted = $Id.TrimStart('0')
@@ -422,16 +469,61 @@ function Register-MycoWorkspace {
             return $existing
         }
         $workspace = [pscustomobject]@{
-            id         = Format-MycoWorkspaceId $registry.nextId
-            path       = $Path
-            origin     = $Origin
-            createdAt  = Get-MycoTimestamp
-            lastUsedAt = Get-MycoTimestamp
+            id          = Format-MycoWorkspaceId $registry.nextId
+            path        = $Path
+            origin      = $Origin
+            createdAt   = Get-MycoTimestamp
+            lastUsedAt  = Get-MycoTimestamp
+            nextSession = 1
         }
         $registry.nextId = [int]$registry.nextId + 1
         $registry.workspaces = @(@($registry.workspaces) + @($workspace))
         Write-MycoRegistry $registry
         return $workspace
+    }
+    return $result
+}
+
+function Get-MycoHighestSessionNumber {
+    <#  The largest number any session in the folder already carries. It is the
+        floor the counter can never drop below, so a registry that was reset or
+        restored from a backup still cannot hand the same number out twice. #>
+    param([string]$CopilotHome)
+    $root = Join-Path $CopilotHome 'session-state'
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return 0 }
+    $dirs = @()
+    try { $dirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop) } catch { return 0 }
+
+    $highest = 0
+    foreach ($dir in $dirs) {
+        $metaPath = Join-Path $dir.FullName 'workspace.yaml'
+        if (-not (Test-Path -LiteralPath $metaPath -PathType Leaf)) { continue }
+        $meta = Read-MycoSessionMeta -Path $metaPath
+        if (-not $meta.ContainsKey('name')) { continue }
+        $id = Get-MycoNamedSessionId -Name ([string]$meta['name'])
+        if (-not $id) { continue }
+        $number = 0
+        if (-not [int]::TryParse($id.Substring(3), [ref]$number)) { continue }
+        if ($number -gt $highest) { $highest = $number }
+    }
+    return $highest
+}
+
+function Reserve-MycoSessionNumber {
+    <#  Hands out the next session number for a workspace and records it before
+        the session exists, so deleting a session never frees its number for
+        reuse. Ids a user has written down must keep meaning one session. #>
+    param([string]$Path, [string]$CopilotHome)
+    $floor = (Get-MycoHighestSessionNumber -CopilotHome $CopilotHome) + 1
+    $result = Invoke-MycoWithRegistryLock {
+        $registry = Read-MycoRegistry
+        $existing = Find-MycoWorkspaceByPath -Registry $registry -Path $Path
+        if (-not $existing) { return $floor }
+        $next = [int]$existing.nextSession
+        if ($next -lt $floor) { $next = $floor }
+        $existing.nextSession = $next + 1
+        Write-MycoRegistry $registry
+        return $next
     }
     return $result
 }
@@ -562,6 +654,8 @@ function Get-MycoSessions {
                 UpdatedAt = $updatedAt
                 Directory = $dir.FullName
                 Active    = $false
+                MycoId    = ''
+                Label     = $name
             })
     }
 
@@ -578,6 +672,60 @@ function Get-MycoSessions {
         }
     }
     return $ordered
+}
+
+function Add-MycoSessionIds {
+    <#  Gives every listed session the id it is shown and resumed by.
+
+        A session myco started carries its id in its own name and keeps it for
+        life, however the list is later reordered. Everything else - sessions
+        from a plain copilot run, or from before myco named them - still falls
+        back to its position in the list, skipping any number a named session
+        already holds so no two rows can ever claim the same id. #>
+    param($Sessions, [string]$WorkspaceId)
+    $list = @($Sessions)
+
+    $taken = @{}
+    foreach ($session in $list) {
+        $named = Get-MycoNamedSessionId -Name $session.Name
+        if ($named) { $taken[$named] = $true }
+    }
+
+    $next = 1
+    foreach ($session in $list) {
+        $named = Get-MycoNamedSessionId -Name $session.Name
+        if ($named) {
+            $session.MycoId = $named
+            $session.Label = Get-MycoNamedSessionLabel -Name $session.Name
+            continue
+        }
+        $id = Format-MycoSessionId -WorkspaceId $WorkspaceId -Number $next
+        while ($taken.ContainsKey($id)) {
+            $next++
+            $id = Format-MycoSessionId -WorkspaceId $WorkspaceId -Number $next
+        }
+        $taken[$id] = $true
+        $next++
+        $session.MycoId = $id
+        $session.Label = $session.Name
+    }
+    return $list
+}
+
+function Get-MycoWorkspaceSessions {
+    <#  The sessions of one workspace, already carrying their ids. Listing and
+        resuming must agree on the numbering, so both come through here. #>
+    param($Workspace, [int]$Max = 15)
+    $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $Workspace.path '.copilot') -Max $Max)
+    return @(Add-MycoSessionIds -Sessions $sessions -WorkspaceId $Workspace.id)
+}
+
+function Format-MycoSessionDisplayId {
+    <#  What the ID column shows: the full name-and-id for a session myco
+        named, and the bare number for anything else. #>
+    param($Session)
+    if ($Session.Name -cmatch $script:MycoNamedSessionPattern) { return $Session.Name }
+    return $Session.MycoId
 }
 
 # ------------------------------------------------------------------ seeding
@@ -801,16 +949,17 @@ function Show-MycoHelp {
     Write-MycoLine ('myco ' + (Get-MycoVersion) + ' - per-project Copilot CLI workspaces') 'Cyan'
     Write-MycoLine ''
     Write-MycoLine 'Usage:'
-    Write-MycoLine '  myco start [copilot args]      Start a Copilot session for this folder.'
-    Write-MycoLine '                                 Creates ./.copilot if it is missing, then'
-    Write-MycoLine '                                 runs: copilot --yolo'
+    Write-MycoLine '  myco start <name> [args]       Start a named Copilot session for this'
+    Write-MycoLine '                                 folder. Creates ./.copilot if it is'
+    Write-MycoLine '                                 missing. The name becomes the session id,'
+    Write-MycoLine '                                 e.g. fix-login -> fix-login-001004.'
     Write-MycoLine '  myco continue [copilot args]   Resume this folder''s most recent session:'
     Write-MycoLine '                                 copilot --yolo --continue'
     Write-MycoLine '  myco sessions                  List every folder myco knows about, with'
     Write-MycoLine '                                 its id and its last 15 sessions.'
     Write-MycoLine '  myco resume <id>               Move into the folder and resume.'
-    Write-MycoLine '                                 <id> is 001 (latest session of folder 001)'
-    Write-MycoLine '                                 or 001002 (second session of folder 001).'
+    Write-MycoLine '                                 <id> is fix-login-001004, or just 001004,'
+    Write-MycoLine '                                 or 001 for the latest session of folder 001.'
     Write-MycoLine '  myco recover [options]         Reopen every session touched in the last'
     Write-MycoLine '                                 2 hours, one Windows Terminal tab each.'
     Write-MycoLine '                                 --hours=<n>  widen or narrow the window'
@@ -848,7 +997,28 @@ function Test-MycoGlobalCopilotFolder {
 }
 
 function Invoke-MycoLaunch {
-    param([string]$Directory, [string[]]$ExtraArgs, [switch]$Continue)
+    param([string]$Directory, [string[]]$ExtraArgs, [switch]$Continue, [switch]$Named)
+
+    $rest = @($ExtraArgs)
+    $slug = ''
+    if ($Named) {
+        # Checked before anything is created, so a mistyped command leaves no
+        # folder and burns no session number.
+        $first = ''
+        if ($rest.Count -gt 0) { $first = [string]$rest[0] }
+        if (-not $first -or $first.StartsWith('-')) {
+            Write-MycoError 'a name is required: myco start <name> [copilot args]'
+            Write-MycoLine '  the name becomes the session id, so you can come back to it:' 'DarkGray'
+            Write-MycoLine '  myco start fix-login   ->   myco resume fix-login-001004' 'DarkGray'
+            return (New-MycoResult 2)
+        }
+        $slug = ConvertTo-MycoSlug $first
+        if (-not $slug) {
+            Write-MycoError ('"' + $first + '" leaves nothing usable as a name. Use letters or digits, e.g. myco start fix-login')
+            return (New-MycoResult 2)
+        }
+        if ($rest.Count -gt 1) { $rest = @($rest[1..($rest.Count - 1)]) } else { $rest = @() }
+    }
 
     $problem = Assert-MycoManageableFolder -Directory $Directory
     if ($problem) {
@@ -873,11 +1043,19 @@ function Invoke-MycoLaunch {
     Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $Directory
 
     $copilotArgs = @('--yolo')
+    $sessionName = ''
+    if ($slug) {
+        $number = Reserve-MycoSessionNumber -Path $Directory -CopilotHome $copilotHome
+        $sessionName = $slug + '-' + (Format-MycoSessionId -WorkspaceId $workspace.id -Number $number)
+        $copilotArgs += @('--name', $sessionName)
+    }
     if ($Continue) { $copilotArgs += '--continue' }
-    if ($ExtraArgs) { $copilotArgs += @($ExtraArgs) }
+    if ($rest) { $copilotArgs += @($rest) }
 
     $verb = if ($existed) { $workspace.origin } else { 'created' }
-    Write-MycoLine ('myco [' + $workspace.id + '] ' + (Split-Path -Leaf $Directory) + '  (' + $verb + ')') 'DarkCyan'
+    $line = 'myco [' + $workspace.id + '] ' + (Split-Path -Leaf $Directory)
+    if ($sessionName) { $line += '  ' + $sessionName }
+    Write-MycoLine ($line + '  (' + $verb + ')') 'DarkCyan'
 
     return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
 }
@@ -905,6 +1083,11 @@ function Show-MycoWorkspaceTable {
     param($Workspace, $Sessions, $Glyphs, [int]$Width)
 
     $idWidth = 8
+    foreach ($session in @($Sessions)) {
+        $shown = Format-MycoSessionDisplayId -Session $session
+        if ($shown.Length -gt $idWidth) { $idWidth = $shown.Length }
+    }
+    if ($idWidth -gt 32) { $idWidth = 32 }
     $statusWidth = 8
     $whenWidth = 12
     # Four columns plus their padding and five vertical rules.
@@ -941,13 +1124,13 @@ function Show-MycoWorkspaceTable {
     $index = 0
     foreach ($session in $Sessions) {
         $index++
-        $sessionId = $Workspace.id + ('{0:000}' -f $index)
+        $sessionId = Format-MycoSessionDisplayId -Session $session
         $status = ''
         if ($session.Active) { $status = [string]$Glyphs.Dot + ' active' }
-        $name = $session.Name
+        $name = $session.Label
         if (-not $name) { $name = '(unnamed)' }
 
-        $row = [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $sessionId $idWidth) +
+        $row = [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $sessionId $idWidth $Glyphs.Ellipsis) +
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $status $statusWidth) +
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell (Format-MycoRelativeTime $session.UpdatedAt) $whenWidth) +
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $name $nameWidth $Glyphs.Ellipsis) +
@@ -985,7 +1168,7 @@ function Show-MycoSessions {
 
     if ($workspaces.Count -eq 0) {
         Write-MycoLine ''
-        Write-MycoLine 'No workspaces yet. Run "myco start" inside a project folder.'
+        Write-MycoLine 'No workspaces yet. Run "myco start <name>" inside a project folder.'
         Write-MycoLine ''
         return (New-MycoResult 0)
     }
@@ -1002,7 +1185,7 @@ function Show-MycoSessions {
         if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) {
             $note = 'folder is missing - run "myco prune" to clean up'
         } else {
-            $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $workspace.path '.copilot') -Max $config.maxSessions)
+            $sessions = @(Get-MycoWorkspaceSessions -Workspace $workspace -Max $config.maxSessions)
             if ($sessions.Count -eq 0) { $note = 'no sessions yet' }
             $activeTotal += @($sessions | Where-Object { $_.Active }).Count
         }
@@ -1048,13 +1231,22 @@ function Invoke-MycoResume {
     $extra = @()
     if (@($ResumeArgs).Count -gt 1) { $extra = @($ResumeArgs[1..(@($ResumeArgs).Count - 1)]) }
 
-    $normalised = $token -replace '[.\-_/]', ''
-    if ($normalised -notmatch '^(\d{3})(\d{3})?$') {
-        return (Invoke-MycoResumeRaw -Directory $Directory -Token $token -ExtraArgs $extra)
+    $workspaceId = ''
+    $sessionIndex = ''
+    if ($token -cmatch $script:MycoNamedSessionPattern) {
+        # The full name-and-id form. Only the digits address the session; the
+        # slug is there for the reader.
+        $digits = $Matches['id']
+        $workspaceId = $digits.Substring(0, 3)
+        $sessionIndex = $digits.Substring(3, 3)
+    } else {
+        $normalised = $token -replace '[.\-_/]', ''
+        if ($normalised -notmatch '^(\d{3})(\d{3})?$') {
+            return (Invoke-MycoResumeRaw -Directory $Directory -Token $token -ExtraArgs $extra)
+        }
+        $workspaceId = $Matches[1]
+        $sessionIndex = $Matches[2]
     }
-
-    $workspaceId = $Matches[1]
-    $sessionIndex = $Matches[2]
 
     $registry = Read-MycoRegistry
     $workspace = Find-MycoWorkspaceById -Registry $registry -Id $workspaceId
@@ -1072,14 +1264,18 @@ function Invoke-MycoResume {
 
     if ($sessionIndex) {
         $config = Read-MycoConfig
-        $sessions = @(Get-MycoSessions -CopilotHome $copilotHome -Max $config.maxSessions)
-        $index = [int]$sessionIndex
-        if ($index -lt 1 -or $index -gt $sessions.Count) {
-            Write-MycoError ('workspace ' + $workspaceId + ' has only ' + $sessions.Count +
-                ' listed session(s), so there is no session ' + $token + '.')
+        $sessions = @(Get-MycoWorkspaceSessions -Workspace $workspace -Max $config.maxSessions)
+        $wanted = Format-MycoSessionId -WorkspaceId $workspace.id -Number ([int]$sessionIndex)
+        $match = $null
+        foreach ($session in $sessions) {
+            if ($session.MycoId -eq $wanted) { $match = $session; break }
+        }
+        if (-not $match) {
+            Write-MycoError ('workspace ' + $workspace.id + ' has no session ' + $wanted +
+                ' among its ' + $sessions.Count + ' listed session(s). Run "myco sessions" to see the ids.')
             return (New-MycoResult 2)
         }
-        $copilotArgs += ('--resume=' + $sessions[$index - 1].Id)
+        $copilotArgs += ('--resume=' + $match.Id)
     } else {
         $copilotArgs += '--continue'
     }
@@ -1199,18 +1395,16 @@ function Get-MycoRecoverCandidates {
 
     foreach ($workspace in @($Registry.workspaces)) {
         if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) { continue }
-        $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $workspace.path '.copilot') -Max $PerWorkspace)
-        $index = 0
+        $sessions = @(Get-MycoWorkspaceSessions -Workspace $workspace -Max $PerWorkspace)
         foreach ($session in $sessions) {
-            $index++
             if ($session.UpdatedAt.ToUniversalTime() -lt $cutoff) { continue }
             if ($session.Active) { $running++; continue }
             [void]$found.Add([pscustomobject]@{
                     WorkspaceId = $workspace.id
                     Path        = $workspace.path
-                    ShortId     = $workspace.id + ('{0:000}' -f $index)
+                    ShortId     = Format-MycoSessionDisplayId -Session $session
                     SessionId   = $session.Id
-                    Name        = $session.Name
+                    Name        = $session.Label
                     UpdatedAt   = $session.UpdatedAt
                 })
         }
@@ -1409,9 +1603,9 @@ function Show-MycoStatus {
     } elseif ($problem) {
         Write-MycoLine ('  workspace    not available here - ' + $problem) 'DarkYellow'
     } elseif (Test-Path -LiteralPath $copilotHome -PathType Container) {
-        Write-MycoLine '  workspace    not registered yet - run "myco start" here to adopt it'
+        Write-MycoLine '  workspace    not registered yet - run "myco start <name>" here to adopt it'
     } else {
-        Write-MycoLine '  workspace    none - run "myco start" here to create one'
+        Write-MycoLine '  workspace    none - run "myco start <name>" here to create one'
     }
 
     if (Test-MycoGlobalCopilotFolder -Directory $Directory) {
@@ -1555,7 +1749,7 @@ function Invoke-MycoCore {
 
     try {
         switch ($command.ToLowerInvariant()) {
-            'start' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest) }
+            'start' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest -Named) }
             'continue' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest -Continue) }
             'sessions' { return (Show-MycoSessions) }
             'list' { return (Show-MycoSessions) }
