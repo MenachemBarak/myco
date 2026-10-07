@@ -41,33 +41,39 @@ function myco {
 
     $plan = $result.Plan
 
-    if (-not (Get-Command copilot -ErrorAction SilentlyContinue)) {
-        Write-MycoError 'the copilot CLI was not found on PATH. Install it with: npm install -g @github/copilot'
+    if (-not (Get-Command $plan.Command -ErrorAction SilentlyContinue)) {
+        Write-MycoError ('the ' + $plan.Command + ' CLI was not found on PATH.')
         $global:LASTEXITCODE = 127
         return
     }
 
-    $hadCopilotHome = Test-Path Env:\COPILOT_HOME
-    $previousCopilotHome = if ($hadCopilotHome) { $env:COPILOT_HOME } else { $null }
+    # Every variable the harness needs is captured before it is changed, and
+    # put back in the finally block. Leaking one would silently redirect the
+    # user's next plain run of that tool.
+    $previous = @{}
+    foreach ($name in @($plan.EnvVars.Keys)) {
+        $previous[$name] = [Environment]::GetEnvironmentVariable($name)
+    }
     $exitCode = 0
 
-    # Splatted, not wrapped in @(): the npm shim on PATH is copilot.ps1, and a
-    # single array argument would reach Copilot as one collapsed string.
-    $copilotArgs = @($plan.CopilotArgs)
+    # Splatted, not wrapped in @(): the npm shims on PATH are .ps1 files, and a
+    # single array argument would reach the tool as one collapsed string.
+    $commandArgs = @($plan.CommandArgs)
+    $command = $plan.Command
 
     try {
         Set-Location -LiteralPath $plan.WorkDir
-        $env:COPILOT_HOME = $plan.CopilotHome
-        & copilot @copilotArgs
+        foreach ($name in @($plan.EnvVars.Keys)) {
+            [Environment]::SetEnvironmentVariable($name, $plan.EnvVars[$name])
+        }
+        & $command @commandArgs
         if ($null -ne $LASTEXITCODE) { $exitCode = [int]$LASTEXITCODE }
     } catch {
         Write-MycoError $_.Exception.Message
         $exitCode = 1
     } finally {
-        if ($hadCopilotHome) {
-            $env:COPILOT_HOME = $previousCopilotHome
-        } else {
-            Remove-Item Env:\COPILOT_HOME -ErrorAction SilentlyContinue
+        foreach ($name in @($previous.Keys)) {
+            [Environment]::SetEnvironmentVariable($name, $previous[$name])
         }
     }
 

@@ -279,9 +279,11 @@ function Read-MycoConfig {
     $data = Read-MycoJsonFile (Get-MycoConfigPath)
     $seed = Get-MycoDefaultSeed
     $maxSessions = Get-MycoDefaultMaxSessions
+    $harness = Get-MycoDefaultHarness
     if ($data -and $data -isnot [string]) {
         $names = @($data.PSObject.Properties.Name)
         if ($names -contains 'seed' -and $data.seed) { $seed = [string]$data.seed }
+        if ($names -contains 'harness' -and $data.harness) { $harness = [string]$data.harness }
         if ($names -contains 'maxSessions' -and $data.maxSessions) {
             $parsed = 0
             if ([int]::TryParse([string]$data.maxSessions, [ref]$parsed) -and $parsed -gt 0) {
@@ -290,10 +292,12 @@ function Read-MycoConfig {
         }
     }
     if (@('none', 'config', 'full') -notcontains $seed) { $seed = Get-MycoDefaultSeed }
+    if ((Get-MycoHarnessNames) -notcontains $harness) { $harness = Get-MycoDefaultHarness }
     return [pscustomobject]@{
         schemaVersion = Get-MycoSchemaVersion
         seed          = $seed
         maxSessions   = $maxSessions
+        harness       = $harness
     }
 }
 
@@ -303,6 +307,7 @@ function Write-MycoConfig {
             schemaVersion = Get-MycoSchemaVersion
             seed          = $Config.seed
             maxSessions   = $Config.maxSessions
+            harness       = $Config.harness
         })
 }
 
@@ -354,10 +359,17 @@ function Read-MycoRegistry {
                     $nextSession = $parsedNext
                 }
             }
+            # Registries written before myco drove more than one tool have no
+            # harness recorded, and those workspaces are copilot ones.
+            $harness = Get-MycoDefaultHarness
+            if (($wNames -contains 'harness') -and $w.harness) {
+                if ((Get-MycoHarnessNames) -contains [string]$w.harness) { $harness = [string]$w.harness }
+            }
             [void]$workspaces.Add([pscustomobject]@{
                     id          = [string]$w.id
                     path        = [string]$w.path
                     origin      = $origin
+                    harness     = $harness
                     createdAt   = $createdAt
                     lastUsedAt  = $lastUsedAt
                     nextSession = $nextSession
@@ -390,6 +402,138 @@ function Write-MycoRegistry {
             nextId        = $Registry.nextId
             workspaces    = @($Registry.workspaces)
         })
+}
+
+function Get-MycoDefaultHarness { 'copilot' }
+
+function Get-MycoHarnessNames { return @('copilot', 'claude', 'opencode', 'pi') }
+
+function Get-MycoHarness {
+    <#  Everything that differs between the CLIs myco can drive, in one place,
+        so adding a harness is a case here rather than a change everywhere.
+
+        Isolation is deliberately uneven, because the tools are. copilot pools
+        every session into one global directory, so it gets a per-folder
+        COPILOT_HOME - that is myco's founding mechanism. claude and opencode
+        already key their sessions on the working directory, so redirecting
+        them would buy nothing and cost plenty: opencode keeps auth.json in the
+        directory XDG_DATA_HOME moves, so isolating it means re-authenticating
+        per project, or copying credentials into a folder inside the user's
+        repository. pi is given an explicit session directory because that is
+        the only handle it offers.
+
+        Returns $null for a name myco does not support. #>
+    param([string]$Name)
+
+    switch ($Name) {
+        'copilot' {
+            return [pscustomobject]@{
+                Name         = 'copilot'
+                Command      = 'copilot'
+                Folder       = '.copilot'
+                HomeVar      = 'COPILOT_HOME'
+                DirArg       = ''
+                AutoArgs     = @('--yolo')
+                NameArg      = '--name'
+                ResumeArg    = '--resume'
+                ResumeJoined = $true
+                ContinueArgs = @('--continue')
+                Seeds        = $true
+                Trusts       = $true
+            }
+        }
+        'claude' {
+            return [pscustomobject]@{
+                Name         = 'claude'
+                Command      = 'claude'
+                Folder       = ''
+                HomeVar      = ''
+                DirArg       = ''
+                AutoArgs     = @('--dangerously-skip-permissions')
+                NameArg      = '--name'
+                ResumeArg    = '--resume'
+                ResumeJoined = $false
+                ContinueArgs = @('--continue')
+                Seeds        = $false
+                Trusts       = $false
+            }
+        }
+        'opencode' {
+            # The one harness with no way to name a session, so myco keeps the
+            # id itself rather than inventing a flag opencode does not have.
+            return [pscustomobject]@{
+                Name         = 'opencode'
+                Command      = 'opencode'
+                Folder       = ''
+                HomeVar      = ''
+                DirArg       = ''
+                AutoArgs     = @('--auto')
+                NameArg      = ''
+                ResumeArg    = '--session'
+                ResumeJoined = $false
+                ContinueArgs = @('--continue')
+                Seeds        = $false
+                Trusts       = $false
+            }
+        }
+        'pi' {
+            return [pscustomobject]@{
+                Name         = 'pi'
+                Command      = 'pi'
+                Folder       = '.pi'
+                HomeVar      = ''
+                DirArg       = '--session-dir'
+                AutoArgs     = @('--approve')
+                NameArg      = '--name'
+                ResumeArg    = '--session-id'
+                ResumeJoined = $false
+                ContinueArgs = @('--continue')
+                Seeds        = $false
+                Trusts       = $false
+            }
+        }
+    }
+    return $null
+}
+
+function Get-MycoHarnessHome {
+    <#  The folder this harness keeps its state in for a project, or '' when
+        the harness manages that itself. #>
+    param($Harness, [string]$Directory)
+    if (-not $Harness.Folder) { return '' }
+    return (Join-Path $Directory $Harness.Folder)
+}
+
+function New-MycoHarnessEnv {
+    param($Harness, [string]$HomePath)
+    $vars = @{}
+    if ($Harness.HomeVar -and $HomePath) { $vars[$Harness.HomeVar] = $HomePath }
+    return $vars
+}
+
+function Format-MycoHarnessList { return ((Get-MycoHarnessNames) -join ', ') }
+
+function Get-MycoCommandNames {
+    return @('start', 'continue', 'sessions', 'list', 'ls', 'resume', 'recover',
+        'status', 'config', 'forget', 'prune', 'version', 'help')
+}
+
+function Resolve-MycoHarness {
+    <#  Which tool to drive when the command line did not name one.
+
+        `start` falls back to the configured default. `continue` and `resume`
+        instead follow the folder, because work already lives in whichever tool
+        it was begun in and sending them elsewhere would open the wrong thing. #>
+    param($Harness, [string]$Directory = '')
+    if ($Harness) { return $Harness }
+    if ($Directory) {
+        $workspace = Find-MycoWorkspaceByPath -Registry (Read-MycoRegistry) -Path $Directory
+        if ($workspace -and $workspace.harness) {
+            $known = Get-MycoHarness ([string]$workspace.harness)
+            if ($known) { return $known }
+        }
+    }
+    return (Get-MycoHarness (Read-MycoConfig).harness)
 }
 
 function Format-MycoWorkspaceId {
@@ -458,20 +602,25 @@ function Find-MycoWorkspaceByPath {
 
 function Register-MycoWorkspace {
     <#  Adds the folder to the registry if it is new, otherwise refreshes its
-        last-used stamp. Returns the workspace record. #>
-    param([string]$Path, [string]$Origin = 'created')
+        last-used stamp. The harness is recorded each time, because `continue`
+        and `resume` have to reach the tool the work is actually in. #>
+    param([string]$Path, [string]$Origin = 'created', [string]$Harness = '')
     $result = Invoke-MycoWithRegistryLock {
         $registry = Read-MycoRegistry
         $existing = Find-MycoWorkspaceByPath -Registry $registry -Path $Path
         if ($existing) {
             $existing.lastUsedAt = Get-MycoTimestamp
+            if ($Harness) { $existing.harness = $Harness }
             Write-MycoRegistry $registry
             return $existing
         }
+        $harnessName = $Harness
+        if (-not $harnessName) { $harnessName = Get-MycoDefaultHarness }
         $workspace = [pscustomobject]@{
             id          = Format-MycoWorkspaceId $registry.nextId
             path        = $Path
             origin      = $Origin
+            harness     = $harnessName
             createdAt   = Get-MycoTimestamp
             lastUsedAt  = Get-MycoTimestamp
             nextSession = 1
@@ -489,6 +638,7 @@ function Get-MycoHighestSessionNumber {
         floor the counter can never drop below, so a registry that was reset or
         restored from a backup still cannot hand the same number out twice. #>
     param([string]$CopilotHome)
+    if (-not $CopilotHome) { return 0 }
     $root = Join-Path $CopilotHome 'session-state'
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { return 0 }
     $dirs = @()
@@ -872,11 +1022,12 @@ function Add-MycoTrustedFolder {
 }
 
 function New-MycoPlan {
-    param([string]$WorkDir, [string]$CopilotHome, [string[]]$CopilotArgs)
+    param([string]$WorkDir, [string]$Command, [string[]]$CommandArgs, $EnvVars = @{})
     return [pscustomobject]@{
         WorkDir     = $WorkDir
-        CopilotHome = $CopilotHome
-        CopilotArgs = @($CopilotArgs)
+        Command     = $Command
+        CommandArgs = @($CommandArgs)
+        EnvVars     = $EnvVars
     }
 }
 
@@ -923,25 +1074,32 @@ function Remove-MycoStalePlanFiles {
 
 function Write-MycoCmdPlan {
     <#  Emits a batch fragment the calling cmd.exe session runs in-process, so
-        the directory change outlives myco. #>
+        the directory change outlives myco. Every variable the harness needs is
+        set before the call and put back afterwards, whatever the harness exits
+        with - leaking one would silently redirect the user's next plain run. #>
     param([string]$PlanFile, $Plan)
-    $restore = if ([string]::IsNullOrEmpty($env:COPILOT_HOME)) {
-        'set "COPILOT_HOME="'
-    } else {
-        'set "COPILOT_HOME=' + $env:COPILOT_HOME + '"'
+
+    $sets = @()
+    $restores = @()
+    foreach ($name in @($Plan.EnvVars.Keys)) {
+        $sets += ('set "' + $name + '=' + $Plan.EnvVars[$name] + '"')
+        $previous = [Environment]::GetEnvironmentVariable($name)
+        if ([string]::IsNullOrEmpty($previous)) {
+            $restores += ('set "' + $name + '="')
+        } else {
+            $restores += ('set "' + $name + '=' + $previous + '"')
+        }
     }
-    $argLine = (@($Plan.CopilotArgs) | ForEach-Object { ConvertTo-MycoCmdArg $_ }) -join ' '
+
+    $argLine = (@($Plan.CommandArgs) | ForEach-Object { ConvertTo-MycoCmdArg $_ }) -join ' '
     # Every element is parenthesised: inside an array literal the comma binds
     # tighter than +, which would otherwise split each line into fragments.
-    $lines = @(
-        '@echo off',
-        ('cd /d "' + $Plan.WorkDir + '"'),
-        ('set "COPILOT_HOME=' + $Plan.CopilotHome + '"'),
-        ('call copilot ' + $argLine),
-        'set "MYCO_COPILOT_RC=%ERRORLEVEL%"',
-        $restore,
-        'set "MYCO_COPILOT_RC=" & exit /b %MYCO_COPILOT_RC%'
-    )
+    $lines = @('@echo off', ('cd /d "' + $Plan.WorkDir + '"')) +
+    $sets +
+    @(('call ' + $Plan.Command + ' ' + $argLine),
+        'set "MYCO_COPILOT_RC=%ERRORLEVEL%"') +
+    $restores +
+    @('set "MYCO_COPILOT_RC=" & exit /b %MYCO_COPILOT_RC%')
     [System.IO.File]::WriteAllLines($PlanFile, $lines, (Get-MycoOemEncoding))
 }
 
@@ -952,12 +1110,17 @@ function Show-MycoHelp {
     Write-MycoLine ('myco ' + (Get-MycoVersion) + ' - per-project Copilot CLI workspaces') 'Cyan'
     Write-MycoLine ''
     Write-MycoLine 'Usage:'
-    Write-MycoLine '  myco start <name> [args]       Start a named Copilot session for this'
-    Write-MycoLine '                                 folder. Creates ./.copilot if it is'
-    Write-MycoLine '                                 missing. The name becomes the session id,'
-    Write-MycoLine '                                 e.g. fix-login -> fix-login-001004.'
-    Write-MycoLine '  myco continue [copilot args]   Resume this folder''s most recent session:'
-    Write-MycoLine '                                 copilot --yolo --continue'
+    Write-MycoLine '  myco [harness] <command> [args]'
+    Write-MycoLine ''
+    Write-MycoLine ('  Harnesses: ' + (Format-MycoHarnessList) + '. Naming one picks the tool for that')
+    Write-MycoLine '  run, as in "myco claude start fix-login". Without one, myco uses the'
+    Write-MycoLine '  harness in config for start, and for continue and resume the harness the'
+    Write-MycoLine '  folder was last started with.'
+    Write-MycoLine ''
+    Write-MycoLine '  myco start <name> [args]       Start a named session for this folder. The'
+    Write-MycoLine '                                 name becomes the session id, e.g. fix-login'
+    Write-MycoLine '                                 -> fix-login-001004.'
+    Write-MycoLine '  myco continue [args]           Resume this folder''s most recent session.'
     Write-MycoLine '  myco sessions                  List every folder myco knows about, with'
     Write-MycoLine '                                 its id and its last 15 sessions.'
     Write-MycoLine '  myco resume <id>               Move into the folder and resume.'
@@ -971,7 +1134,8 @@ function Show-MycoHelp {
     Write-MycoLine '                                 --max=<n>    raise the tab cap'
     Write-MycoLine '                                 Sessions already running are left alone.'
     Write-MycoLine '  myco status                    Describe the current folder.'
-    Write-MycoLine '  myco config [key] [value]      Show or change settings (seed, maxSessions).'
+    Write-MycoLine '  myco config [key] [value]      Show or change settings (harness, seed,'
+    Write-MycoLine '                                 maxSessions).'
     Write-MycoLine '  myco forget <id>               Drop a folder from the registry only.'
     Write-MycoLine '  myco prune                     Drop folders that no longer exist on disk.'
     Write-MycoLine '  myco version                   Print the version.'
@@ -1000,7 +1164,9 @@ function Test-MycoGlobalCopilotFolder {
 }
 
 function Invoke-MycoLaunch {
-    param([string]$Directory, [string[]]$ExtraArgs, [switch]$Continue, [switch]$Named)
+    param([string]$Directory, [string[]]$ExtraArgs, [switch]$Continue, [switch]$Named, $Harness = $null)
+
+    if (-not $Harness) { $Harness = Get-MycoHarness (Get-MycoDefaultHarness) }
 
     $rest = @($ExtraArgs)
     $slug = ''
@@ -1010,7 +1176,7 @@ function Invoke-MycoLaunch {
         $first = ''
         if ($rest.Count -gt 0) { $first = [string]$rest[0] }
         if (-not $first -or $first.StartsWith('-')) {
-            Write-MycoError 'a name is required: myco start <name> [copilot args]'
+            Write-MycoError 'a name is required: myco start <name> [harness args]'
             Write-MycoLine '  the name becomes the session id, so you can come back to it:' 'DarkGray'
             Write-MycoLine '  myco start fix-login   ->   myco resume fix-login-001004' 'DarkGray'
             return (New-MycoResult 2)
@@ -1029,38 +1195,53 @@ function Invoke-MycoLaunch {
         return (New-MycoResult 2)
     }
 
-    $copilotHome = Join-Path $Directory '.copilot'
-    $existed = Test-Path -LiteralPath $copilotHome -PathType Container
-    if (-not $existed) {
-        try {
-            New-Item -ItemType Directory -Force -Path $copilotHome -ErrorAction Stop | Out-Null
-        } catch {
-            Write-MycoError ('could not create .copilot here: ' + $_.Exception.Message)
-            return (New-MycoResult 1)
+    # Only harnesses that keep project state in a folder of their own have one
+    # to create; the rest key their sessions on the working directory.
+    $harnessHome = Get-MycoHarnessHome -Harness $Harness -Directory $Directory
+    $existed = $false
+    if ($harnessHome) {
+        $existed = Test-Path -LiteralPath $harnessHome -PathType Container
+        if (-not $existed) {
+            try {
+                New-Item -ItemType Directory -Force -Path $harnessHome -ErrorAction Stop | Out-Null
+            } catch {
+                Write-MycoError ('could not create ' + $Harness.Folder + ' here: ' + $_.Exception.Message)
+                return (New-MycoResult 1)
+            }
+            if ($Harness.Seeds) {
+                Initialize-MycoWorkspaceSeed -CopilotHome $harnessHome -Mode (Read-MycoConfig).seed
+            }
         }
-        Initialize-MycoWorkspaceSeed -CopilotHome $copilotHome -Mode (Read-MycoConfig).seed
     }
 
     $origin = if ($existed) { 'adopted' } else { 'created' }
-    $workspace = Register-MycoWorkspace -Path $Directory -Origin $origin
-    Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $Directory
+    $workspace = Register-MycoWorkspace -Path $Directory -Origin $origin -Harness $Harness.Name
+    if ($Harness.Trusts) {
+        Add-MycoTrustedFolder -CopilotHome $harnessHome -Directory $Directory
+    }
 
-    $copilotArgs = @('--yolo')
+    $commandArgs = @($Harness.AutoArgs)
+    if ($Harness.DirArg -and $harnessHome) { $commandArgs += @($Harness.DirArg, $harnessHome) }
+
     $sessionName = ''
     if ($slug) {
-        $number = Reserve-MycoSessionNumber -Path $Directory -CopilotHome $copilotHome
+        $number = Reserve-MycoSessionNumber -Path $Directory -CopilotHome $harnessHome
         $sessionName = $slug + '-' + (Format-MycoSessionId -WorkspaceId $workspace.id -Number $number)
-        $copilotArgs += @('--name', $sessionName)
+        if ($Harness.NameArg) { $commandArgs += @($Harness.NameArg, $sessionName) }
     }
-    if ($Continue) { $copilotArgs += '--continue' }
-    if ($rest) { $copilotArgs += @($rest) }
+    if ($Continue) { $commandArgs += @($Harness.ContinueArgs) }
+    if ($rest) { $commandArgs += @($rest) }
 
     $verb = if ($existed) { $workspace.origin } else { 'created' }
     $line = 'myco [' + $workspace.id + '] ' + (Split-Path -Leaf $Directory)
     if ($sessionName) { $line += '  ' + $sessionName }
-    Write-MycoLine ($line + '  (' + $verb + ')') 'DarkCyan'
+    $line += '  (' + $Harness.Name
+    if ($harnessHome) { $line += ', ' + $verb }
+    $line += ')'
+    Write-MycoLine $line 'DarkCyan'
 
-    return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
+    return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -Command $Harness.Command `
+                -CommandArgs $commandArgs -EnvVars (New-MycoHarnessEnv -Harness $Harness -HomePath $harnessHome)))
 }
 
 function Format-MycoSessionName {
@@ -1262,8 +1443,11 @@ function Invoke-MycoResume {
         return (New-MycoResult 2)
     }
 
-    $copilotHome = Join-Path $workspace.path '.copilot'
-    $copilotArgs = @('--yolo')
+    $harness = Get-MycoHarness ([string]$workspace.harness)
+    if (-not $harness) { $harness = Get-MycoHarness (Get-MycoDefaultHarness) }
+    $harnessHome = Get-MycoHarnessHome -Harness $harness -Directory $workspace.path
+    $commandArgs = @($harness.AutoArgs)
+    if ($harness.DirArg -and $harnessHome) { $commandArgs += @($harness.DirArg, $harnessHome) }
 
     if ($sessionIndex) {
         $config = Read-MycoConfig
@@ -1278,33 +1462,52 @@ function Invoke-MycoResume {
                 ' among its ' + $sessions.Count + ' listed session(s). Run "myco sessions" to see the ids.')
             return (New-MycoResult 2)
         }
-        $copilotArgs += ('--resume=' + $match.Id)
+        $commandArgs += @(Format-MycoResumeArgs -Harness $harness -SessionId $match.Id)
     } else {
-        $copilotArgs += '--continue'
+        $commandArgs += @($harness.ContinueArgs)
     }
-    $copilotArgs += $extra
+    $commandArgs += $extra
 
     Update-MycoWorkspaceUsage -Path $workspace.path
-    Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $workspace.path
-    Write-MycoLine ('myco [' + $workspace.id + '] ' + (Split-Path -Leaf $workspace.path)) 'DarkCyan'
+    if ($harness.Trusts) {
+        Add-MycoTrustedFolder -CopilotHome $harnessHome -Directory $workspace.path
+    }
+    Write-MycoLine ('myco [' + $workspace.id + '] ' + (Split-Path -Leaf $workspace.path) +
+        '  (' + $harness.Name + ')') 'DarkCyan'
 
-    return (New-MycoResult 0 (New-MycoPlan -WorkDir $workspace.path -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
+    return (New-MycoResult 0 (New-MycoPlan -WorkDir $workspace.path -Command $harness.Command `
+                -CommandArgs $commandArgs -EnvVars (New-MycoHarnessEnv -Harness $harness -HomePath $harnessHome)))
+}
+
+function Format-MycoResumeArgs {
+    <#  Each harness spells "resume this session" differently, and copilot is
+        the only one that joins the id to the flag with an equals sign. #>
+    param($Harness, [string]$SessionId)
+    if ($Harness.ResumeJoined) { return @($Harness.ResumeArg + '=' + $SessionId) }
+    return @($Harness.ResumeArg, $SessionId)
 }
 
 function Invoke-MycoResumeRaw {
-    <#  Anything that is not a myco id is handed to copilot as-is, so session
-        uuids, id prefixes and session names keep working. #>
+    <#  Anything that is not a myco id is handed to the harness as-is, so
+        session uuids, id prefixes and session names keep working. #>
     param([string]$Directory, [string]$Token, [string[]]$ExtraArgs)
-    $copilotHome = Join-Path $Directory '.copilot'
-    if (-not (Test-Path -LiteralPath $copilotHome -PathType Container)) {
-        Write-MycoError ('"' + $Token + '" is not a myco id, and this folder has no .copilot to search. ' +
-            'Run "myco sessions" for ids.')
+    $harness = Resolve-MycoHarness $null -Directory $Directory
+    $harnessHome = Get-MycoHarnessHome -Harness $harness -Directory $Directory
+    if ($harnessHome -and -not (Test-Path -LiteralPath $harnessHome -PathType Container)) {
+        Write-MycoError ('"' + $Token + '" is not a myco id, and this folder has no ' + $harness.Folder +
+            ' to search. Run "myco sessions" for ids.')
         return (New-MycoResult 2)
     }
-    $copilotArgs = @('--yolo', ('--resume=' + $Token)) + @($ExtraArgs)
+    $commandArgs = @($harness.AutoArgs)
+    if ($harness.DirArg -and $harnessHome) { $commandArgs += @($harness.DirArg, $harnessHome) }
+    $commandArgs += @(Format-MycoResumeArgs -Harness $harness -SessionId $Token)
+    $commandArgs += @($ExtraArgs)
     Update-MycoWorkspaceUsage -Path $Directory
-    Add-MycoTrustedFolder -CopilotHome $copilotHome -Directory $Directory
-    return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -CopilotHome $copilotHome -CopilotArgs $copilotArgs))
+    if ($harness.Trusts) {
+        Add-MycoTrustedFolder -CopilotHome $harnessHome -Directory $Directory
+    }
+    return (New-MycoResult 0 (New-MycoPlan -WorkDir $Directory -Command $harness.Command `
+                -CommandArgs $commandArgs -EnvVars (New-MycoHarnessEnv -Harness $harness -HomePath $harnessHome)))
 }
 
 function Get-MycoDefaultRecoverHours { 2 }
@@ -1632,8 +1835,12 @@ function Invoke-MycoConfig {
     if ($count -eq 0) {
         Write-MycoLine ''
         Write-MycoLine 'myco config' 'Cyan'
+        Write-MycoLine ('  harness      ' + $config.harness + '    (' + (Format-MycoHarnessList) + ')')
         Write-MycoLine ('  seed         ' + $config.seed + '    (none | config | full)')
         Write-MycoLine ('  maxSessions  ' + $config.maxSessions)
+        Write-MycoLine ''
+        Write-MycoLine '  harness is the tool a bare "myco start" uses; name one to override it,'
+        Write-MycoLine '  as in "myco claude start fix-login".'
         Write-MycoLine ''
         Write-MycoLine '  none   a new .copilot starts empty'
         Write-MycoLine '  config copies settings.json and mcp-config.json from your global Copilot home'
@@ -1644,12 +1851,23 @@ function Invoke-MycoConfig {
 
     $key = ([string]$ConfigArgs[0]).ToLowerInvariant()
     if ($count -lt 2) {
-        Write-MycoError 'usage: myco config <seed|maxSessions> <value>'
+        Write-MycoError 'usage: myco config <harness|seed|maxSessions> <value>'
         return (New-MycoResult 2)
     }
     $value = [string]$ConfigArgs[1]
 
     switch ($key) {
+        'harness' {
+            $normalised = $value.ToLowerInvariant()
+            if ((Get-MycoHarnessNames) -notcontains $normalised) {
+                Write-MycoError ('harness must be one of: ' + (Format-MycoHarnessList))
+                return (New-MycoResult 2)
+            }
+            $config.harness = $normalised
+            Write-MycoConfig $config
+            Write-MycoLine ('myco config: harness = ' + $normalised)
+            return (New-MycoResult 0)
+        }
         'seed' {
             $normalised = $value.ToLowerInvariant()
             if (@('none', 'config', 'full') -notcontains $normalised) {
@@ -1750,10 +1968,23 @@ function Invoke-MycoCore {
     $rest = @()
     if ($argv.Count -gt 1) { $rest = @($argv[1..($argv.Count - 1)]) }
 
+    # A leading harness name selects the tool and is then out of the way, so
+    # every command below sees the same argument shape it always has.
+    $harness = $null
+    if ((Get-MycoHarnessNames) -contains $command.ToLowerInvariant()) {
+        $harness = Get-MycoHarness $command.ToLowerInvariant()
+        if ($rest.Count -eq 0) {
+            Write-MycoError ('usage: myco ' + $harness.Name + ' <command> [args]   (try "myco help")')
+            return (New-MycoResult 2)
+        }
+        $command = $rest[0]
+        if ($rest.Count -gt 1) { $rest = @($rest[1..($rest.Count - 1)]) } else { $rest = @() }
+    }
+
     try {
         switch ($command.ToLowerInvariant()) {
-            'start' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest -Named) }
-            'continue' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest -Continue) }
+            'start' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest -Named -Harness (Resolve-MycoHarness $harness)) }
+            'continue' { return (Invoke-MycoLaunch -Directory $directory -ExtraArgs $rest -Continue -Harness (Resolve-MycoHarness $harness -Directory $directory)) }
             'sessions' { return (Show-MycoSessions) }
             'list' { return (Show-MycoSessions) }
             'ls' { return (Show-MycoSessions) }
@@ -1770,6 +2001,15 @@ function Invoke-MycoCore {
             '-v' { Write-MycoLine ('myco ' + (Get-MycoVersion)); return (New-MycoResult 0) }
             '--version' { Write-MycoLine ('myco ' + (Get-MycoVersion)); return (New-MycoResult 0) }
             default {
+                # "myco gemini start x" is a harness attempt, not a typo'd
+                # command, so it is worth naming what myco can actually drive.
+                $looksLikeHarness = ($rest.Count -gt 0) -and
+                    ((Get-MycoCommandNames) -contains ([string]$rest[0]).ToLowerInvariant())
+                if ($looksLikeHarness) {
+                    Write-MycoError ('"' + $command + '" is not a harness myco can drive. Supported: ' +
+                        (Format-MycoHarnessList) + '.')
+                    return (New-MycoResult 2)
+                }
                 Write-MycoError ('unknown command "' + $command + '". Run "myco help" to see what is available.')
                 return (New-MycoResult 2)
             }
