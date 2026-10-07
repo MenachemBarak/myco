@@ -14,6 +14,38 @@ machine rather than by reasoning about it.
 
 ## 1. Core mechanism
 
+### 1.0 One set of commands over four harnesses
+
+`myco <harness> <command>` picks the tool. Without one, `start` uses
+`config.harness` (copilot unless changed) and `continue`/`resume` use the
+harness recorded on the workspace.
+
+**Why the fallback differs.** `start` is a free choice, so the default applies.
+`continue` and `resume` are not: the work already exists inside one tool, and
+sending them to another would open the wrong thing, or nothing.
+
+**Everything that differs lives in `Get-MycoHarness`** — command, auto-approve
+flag, naming flag, how "resume this session" is spelled, and what isolation is
+needed. Adding a fifth harness is a case there, not a change everywhere.
+
+**Isolation is deliberately uneven, because the tools are.**
+
+| Harness | Isolation | Why |
+| --- | --- | --- |
+| copilot | per-folder `COPILOT_HOME` | it really does pool every session globally; this is myco's founding mechanism |
+| claude | none | already keys sessions on the working directory — 203 such project folders on the author's machine |
+| opencode | none | same, **and** `auth.json` lives in the directory `XDG_DATA_HOME` moves |
+| pi | `--session-dir` in the project | the only handle it offers |
+
+**The opencode finding is the important one.** Isolating it the way copilot is
+isolated would force a login per project, or require myco to copy credentials
+into a folder inside the user's repository, where they could be committed.
+Neither is acceptable, and the uniform-looking design that would have caused it
+was rejected for that reason. Do not "tidy this up" into one rule.
+
+**opencode cannot name a session.** It is the only one of the four with no
+naming flag, so no `--name` is invented for it.
+
 ### 1.1 Per-folder `COPILOT_HOME`
 
 `myco start` points `COPILOT_HOME` at `<project>\.copilot` for the life of one

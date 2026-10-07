@@ -18,11 +18,14 @@ always-on part; load a reference only when the work calls for it.
 
 ## What myco is
 
-A Windows CLI that gives each project folder its own GitHub Copilot CLI
-workspace. `myco start` points `COPILOT_HOME` at `<project>\.copilot`, so
-sessions, history and settings stay with the project instead of piling into one
-global directory. A numbered registry lets you list every folder and resume any
-recent session by a short id such as `001002`.
+A Windows CLI that gives each project folder its own coding-agent workspace,
+and drives **copilot**, **claude**, **opencode** and **pi** behind one set of
+commands. `myco start <name>` names a session and gives it a stable id; a
+numbered registry lets you list every folder and resume any recent session by a
+short id such as `fix-login-001002`.
+
+`myco <harness> <command>` picks the tool for that run. Without one, `start`
+uses `config.harness` and `continue`/`resume` follow the folder.
 
 PowerShell and `cmd.exe` entry points over one shared core. No compilation, no
 dependencies, no package manager.
@@ -36,6 +39,11 @@ elsewhere.** That is why a project workspace does not require signing in again.
 If a future Copilot release moves authentication into `COPILOT_HOME`, or stops
 reading that variable, myco's premise breaks. Check this first when something
 large stops working.
+
+**This mechanism is copilot's alone.** claude and opencode already key sessions
+on the working directory, and opencode keeps its credentials in the directory
+`XDG_DATA_HOME` would move — so they are left on their own state. See
+`decisions.md` 1.0 before changing that.
 
 ## Where to look
 
@@ -85,7 +93,13 @@ Not style preferences. Each is load-bearing, and several were learned by
 breaking them.
 
 - **`COPILOT_HOME` is always restored**, in both shells, including on failure.
-  Leaking it silently redirects the user's next plain `copilot` run.
+  Leaking it silently redirects the user's next plain `copilot` run. The same
+  goes for every variable a harness needs.
+- **A harness is never given another harness's flags or environment.** What
+  differs between the tools belongs in `Get-MycoHarness`, nowhere else.
+- **opencode is never isolated by `XDG_DATA_HOME`.** Its credentials live
+  there, so isolating it means a login per project or credentials copied into
+  the user's repository.
 - **Arguments reach Copilot separately.** Splat a variable; `@(...)` is the
   array subexpression operator, not splatting, and collapses everything into a
   single argument against the npm `copilot.ps1` shim.

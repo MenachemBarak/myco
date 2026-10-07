@@ -75,6 +75,7 @@ release, and after touching launching, argument handling or session state:
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File test\Verify-Live.ps1
 pwsh -NoProfile -ExecutionPolicy Bypass -File test\Verify-Live-Names.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File test\Verify-Live-Harnesses.ps1
 ```
 
 `Verify-Live.ps1` creates one real session, runs `myco recover` verbatim, and
@@ -87,6 +88,12 @@ the listing, `resume <slug>-<id>`, `resume <id>`, a second start taking the
 next number, and a nameless start being refused. It needs no window. It found
 `.session-operation-locks` — a folder the stub never creates, which the suite
 therefore could not see.
+
+`Verify-Live-Harnesses.ps1` launches all four real CLIs through myco and lets
+each tool judge the arguments myco built for it, by appending `--help` so the
+tool parses everything, prints its own usage and exits. That is free, and the
+usage text also proves which binary ran. `-SkipPaid` stops before the real
+round trips on copilot and claude.
 
 **Never improvise a probe instead.** It is isolated in three dimensions, and
 each one was learned the hard way:

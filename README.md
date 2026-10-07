@@ -1,11 +1,22 @@
 # myco
 
-Per-project workspaces for the GitHub Copilot CLI, on Windows.
+Per-project workspaces for coding-agent CLIs, on Windows. Drives
+**copilot**, **claude**, **opencode** and **pi** behind one set of commands.
 
 By default every Copilot CLI session — in every project you touch — piles into
 one global directory. `myco` gives each project folder its own `.copilot`
 directory, keeps a numbered registry of those folders, and lets you jump back
 into any recent session with a short id.
+
+```console
+> myco start "split billing"            # your default harness
+> myco claude start "split billing"     # or name one
+> myco opencode start "split billing"
+> myco pi start "split billing"
+```
+
+`continue` and `resume` need no harness name: they follow the folder, because
+the work already lives in whichever tool you began it in.
 
 ```text
   myco · 2 workspaces · 1 active
@@ -57,6 +68,38 @@ process still exists **and** started no later than the lock was written — the
 process that wrote the lock must have been alive at that moment, so anything
 that started afterwards is an unrelated program that inherited the id.
 
+## Harnesses
+
+myco drives four coding-agent CLIs. Name one to pick it for that run, or set
+your default with `myco config harness <name>`:
+
+```console
+> myco config harness claude
+> myco start "split billing"      # now goes to claude
+> myco copilot start "hotfix"     # this one run goes to copilot
+```
+
+Each tool is driven on its own terms — its own auto-approve flag, its own way
+of naming and resuming a session:
+
+| | auto-approve | names sessions | project isolation |
+| --- | --- | --- | --- |
+| `copilot` | `--yolo` | yes | per-folder `COPILOT_HOME` |
+| `claude` | `--dangerously-skip-permissions` | yes | none needed |
+| `opencode` | `--auto` | **no** | none needed |
+| `pi` | `--approve` | yes | `--session-dir` in the project |
+
+**Why the isolation column is uneven.** myco exists because the Copilot CLI
+pools every session into one global directory. claude and opencode already key
+their sessions on the working directory, so redirecting them would buy nothing
+— and for opencode it would cost a great deal: its `auth.json` lives in the
+directory `XDG_DATA_HOME` moves, so isolating it would force you to log in
+again per project, or make myco copy your credentials into a folder inside your
+repository. It does neither.
+
+opencode is the only one of the four with no way to name a session, so myco
+does not invent a flag for it.
+
 ## How it works
 
 The Copilot CLI reads `COPILOT_HOME` to decide where its configuration and
@@ -101,8 +144,8 @@ never touched.
 
 | Command | What it does |
 | --- | --- |
-| `myco start <name> [copilot args]` | Creates `.\.copilot` if missing, registers the folder, and runs `copilot --yolo --name <name>-<id>`. The name is required. |
-| `myco continue [copilot args]` | Resumes this folder's most recent session: `copilot --yolo --continue`. No name needed. |
+| `myco [harness] start <name> [args]` | Creates the harness's project folder if it needs one, registers the folder, and starts a named session. |
+| `myco [harness] continue [args]` | Resumes this folder's most recent session. Without a harness, uses the one the folder was last started with. |
 | `myco sessions` | Lists every registered folder as a table, with its id, the last 15 sessions and which are running. Aliases: `ls`, `list`. |
 | `myco resume <id>` | Moves your shell into the folder and resumes. |
 | `myco recover [options]` | Reopens every session touched recently, one Windows Terminal tab each. |
@@ -208,6 +251,7 @@ State lives in `%APPDATA%\.myco` (`registry.json` and `config.json`). Set
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `harness` | `copilot` | Which CLI a bare `myco start` uses. |
 | `seed` | `full` | What to copy into a **newly created** `.copilot`. |
 | `maxSessions` | `15` | How many sessions to list and address per folder. |
 
