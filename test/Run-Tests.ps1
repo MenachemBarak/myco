@@ -99,14 +99,25 @@ function New-Sandbox {
     $log = Join-Path $root 'copilot-calls.log'
     $wtLog = Join-Path $root 'wt-calls.log'
 
-    # Recording stub that impersonates the copilot CLI. Arguments are recorded
+    # Every harness myco can drive gets a recording stub. Each records which
+    # tool it is and the isolation variable that tool actually uses, so a
+    # harness launched with another harness's environment is detectable.
+    $harnesses = @(
+        @{ Name = 'copilot'; HomeVar = 'COPILOT_HOME' },
+        @{ Name = 'claude'; HomeVar = 'CLAUDE_CONFIG_DIR' },
+        @{ Name = 'opencode'; HomeVar = 'XDG_DATA_HOME' },
+        @{ Name = 'pi'; HomeVar = '' }
+    )
+
+    # Recording stub that impersonates a harness CLI. Arguments are recorded
     # one per line as well as verbatim, so an entry point that collapses them
     # into a single argument is detectable.
-    $stub = @'
+    $stubTemplate = @'
 @echo off
 >>"%MYCO_TEST_LOG%" echo [call]
+>>"%MYCO_TEST_LOG%" echo tool=__TOOL__
 >>"%MYCO_TEST_LOG%" echo cwd=%CD%
->>"%MYCO_TEST_LOG%" echo home=%COPILOT_HOME%
+>>"%MYCO_TEST_LOG%" echo home=__HOMEREF__
 >>"%MYCO_TEST_LOG%" echo args=%*
 :myco_stub_loop
 if "%~1"=="" goto :myco_stub_done
@@ -116,21 +127,33 @@ goto :myco_stub_loop
 :myco_stub_done
 exit /b 0
 '@
-    Set-Content -LiteralPath (Join-Path $stubBin 'copilot.cmd') -Value $stub -Encoding ASCII
 
     # npm installs both copilot.cmd and copilot.ps1, and PowerShell resolves the
     # .ps1 shim in preference to the .cmd one. The suite mirrors that, because
     # argument handling differs sharply between the two.
-    $stubPs1 = @'
+    $stubPs1Template = @'
 $log = $env:MYCO_TEST_LOG
 Add-Content -LiteralPath $log -Value '[call]'
+Add-Content -LiteralPath $log -Value 'tool=__TOOL__'
 Add-Content -LiteralPath $log -Value ('cwd=' + (Get-Location).Path)
-Add-Content -LiteralPath $log -Value ('home=' + [string]$env:COPILOT_HOME)
+Add-Content -LiteralPath $log -Value ('home=' + [string]__HOMEREFPS__)
 Add-Content -LiteralPath $log -Value ('args=' + ($args -join ' '))
 foreach ($a in $args) { Add-Content -LiteralPath $log -Value ('arg=' + [string]$a) }
 exit 0
 '@
-    Set-Content -LiteralPath (Join-Path $stubBin 'copilot.ps1') -Value $stubPs1 -Encoding UTF8
+
+    foreach ($harness in $harnesses) {
+        $cmdHomeRef = ''
+        $psHomeRef = "''"
+        if ($harness.HomeVar) {
+            $cmdHomeRef = '%' + $harness.HomeVar + '%'
+            $psHomeRef = '$env:' + $harness.HomeVar
+        }
+        $stub = $stubTemplate.Replace('__TOOL__', $harness.Name).Replace('__HOMEREF__', $cmdHomeRef)
+        Set-Content -LiteralPath (Join-Path $stubBin ($harness.Name + '.cmd')) -Value $stub -Encoding ASCII
+        $stubPs1 = $stubPs1Template.Replace('__TOOL__', $harness.Name).Replace('__HOMEREFPS__', $psHomeRef)
+        Set-Content -LiteralPath (Join-Path $stubBin ($harness.Name + '.ps1')) -Value $stubPs1 -Encoding UTF8
+    }
 
     # Stands in for Windows Terminal. A stub earlier on PATH shadows the real
     # wt.exe, so the suite never opens a window. Omitted when a test needs to
@@ -286,6 +309,7 @@ function Get-CopilotCalls {
         switch -Regex ($line) {
             '^\[call\]$' {
                 $current = [pscustomobject]@{
+                    Tool    = ''
                     Cwd     = ''
                     Home    = ''
                     CliArgs = ''
@@ -293,6 +317,7 @@ function Get-CopilotCalls {
                 }
                 [void]$calls.Add($current)
             }
+            '^tool=(.*)$' { if ($current) { $current.Tool = $Matches[1].Trim() } }
             '^cwd=(.*)$' { if ($current) { $current.Cwd = $Matches[1].Trim() } }
             '^home=(.*)$' { if ($current) { $current.Home = $Matches[1].Trim() } }
             '^args=(.*)$' { if ($current) { $current.CliArgs = $Matches[1].Trim() } }
@@ -306,6 +331,19 @@ function Get-LastCopilotCall {
     param($Sandbox)
     $calls = @(Get-CopilotCalls -Sandbox $Sandbox)
     if ($calls.Count -eq 0) { throw 'Expected copilot to be invoked, but it never was.' }
+    return $calls[$calls.Count - 1]
+}
+
+function Get-LastHarnessCall {
+    <#  The last call made to a particular harness, so a test can prove that
+        myco launched the tool it was asked for and not another one. #>
+    param($Sandbox, [string]$Tool)
+    $calls = @(Get-CopilotCalls -Sandbox $Sandbox | Where-Object { $_.Tool -eq $Tool })
+    if ($calls.Count -eq 0) {
+        $seen = @(Get-CopilotCalls -Sandbox $Sandbox | ForEach-Object { $_.Tool }) -join ', '
+        if (-not $seen) { $seen = '(nothing)' }
+        throw ("Expected $Tool to be invoked, but the harnesses called were: " + $seen)
+    }
     return $calls[$calls.Count - 1]
 }
 
@@ -385,7 +423,12 @@ function Invoke-Myco {
             ('call "' + $script:MycoCmd + '" ' + $quoted + ' >>"' + $outFile + '" 2>&1'),
             ('echo MYCO_EXIT=%ERRORLEVEL%>>"' + $outFile + '"'),
             ('echo FINALCWD=%CD%>>"' + $outFile + '"'),
-            ('if defined COPILOT_HOME (echo LEAK=%COPILOT_HOME%>>"' + $outFile + '") else (echo LEAK=>>"' + $outFile + '")')
+            ('if defined COPILOT_HOME (echo LEAK=%COPILOT_HOME%>>"' + $outFile + '") else (echo LEAK=>>"' + $outFile + '")'),
+            ('set "MYCO_LEAKS="'),
+            ('if defined COPILOT_HOME set "MYCO_LEAKS=%MYCO_LEAKS%COPILOT_HOME,"'),
+            ('if defined CLAUDE_CONFIG_DIR set "MYCO_LEAKS=%MYCO_LEAKS%CLAUDE_CONFIG_DIR,"'),
+            ('if defined XDG_DATA_HOME set "MYCO_LEAKS=%MYCO_LEAKS%XDG_DATA_HOME,"'),
+            ('echo LEAKALL=%MYCO_LEAKS%>>"' + $outFile + '"')
         )
         Set-Content -LiteralPath $driver -Value ($lines -join "`r`n") -Encoding ASCII
         $cmdExe = Resolve-ShellExe 'cmd.exe'
@@ -405,7 +448,8 @@ function Invoke-Myco {
             'myco @mycoArgs',
             'Write-Output ("MYCO_EXIT=" + $global:LASTEXITCODE)',
             'Write-Output ("FINALCWD=" + (Get-Location).Path)',
-            'Write-Output ("LEAK=" + [string]$env:COPILOT_HOME)'
+            'Write-Output ("LEAK=" + [string]$env:COPILOT_HOME)',
+            'Write-Output ("LEAKALL=" + ((@(''COPILOT_HOME'', ''CLAUDE_CONFIG_DIR'', ''XDG_DATA_HOME'') | Where-Object { [Environment]::GetEnvironmentVariable($_) }) -join '',''))'
         )
         Set-Content -LiteralPath $driver -Value ($lines -join "`r`n") -Encoding UTF8
         $runner = {
@@ -415,7 +459,7 @@ function Invoke-Myco {
     }
 
     $saved = @{}
-    foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'MYCO_TEST_WT_LOG', 'PATH', 'COPILOT_HOME', 'TEMP', 'TMP') {
+    foreach ($k in 'MYCO_HOME', 'USERPROFILE', 'MYCO_TEST_LOG', 'MYCO_TEST_WT_LOG', 'PATH', 'COPILOT_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_DATA_HOME', 'TEMP', 'TMP') {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
     }
     $previousErrorAction = $ErrorActionPreference
@@ -428,6 +472,8 @@ function Invoke-Myco {
         $env:MYCO_TEST_LOG = $Sandbox.Log
         $env:MYCO_TEST_WT_LOG = $Sandbox.WtLog
         $env:COPILOT_HOME = ''
+        $env:CLAUDE_CONFIG_DIR = ''
+        $env:XDG_DATA_HOME = ''
         $env:TEMP = $Sandbox.Temp
         $env:TMP = $Sandbox.Temp
         if ($Sandbox.MinimalPath) {
@@ -459,12 +505,14 @@ function Invoke-Myco {
     $finalCwd = if ($text -match 'FINALCWD=(.*)') { $Matches[1].Trim() } else { '' }
     $exit = if ($text -match 'MYCO_EXIT=(.*)') { $Matches[1].Trim() } else { '' }
     $leak = if ($text -match 'LEAK=(.*)') { $Matches[1].Trim() } else { '' }
+    $leaks = if ($text -match 'LEAKALL=(.*)') { $Matches[1].Trim().Trim(',') } else { '' }
 
     [pscustomobject]@{
         Output   = $text
         FinalCwd = $finalCwd
         ExitCode = $exit
         Leak     = $leak
+        Leaks    = $leaks
     }
 }
 
@@ -804,6 +852,160 @@ Describe 'myco start names' {
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-Match $r.Output '001002[^\r\n]*Foreign work' 'the taken number must be skipped'
         Assert-Match $r.Output 'alpha-001001' 'the named session keeps its number'
+    }
+}
+
+Describe 'harnesses' {
+
+    It 'launches the harness it is asked for, in the project directory' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'fix-login')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Equal $proj $call.Cwd 'claude must run in the project directory'
+    }
+
+    It 'gives each harness its own auto-approve flag' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        $claude = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Match $claude.CliArgs '--dangerously-skip-permissions' 'claude has its own flag for this'
+        Assert-NoMatch $claude.CliArgs '--yolo' 'copilot''s flag must not be sent to claude'
+
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('opencode', 'start', 'work')
+        $opencode = Get-LastHarnessCall -Sandbox $sb -Tool 'opencode'
+        Assert-Match $opencode.CliArgs '--auto' 'opencode uses --auto'
+
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('pi', 'start', 'work')
+        $pi = Get-LastHarnessCall -Sandbox $sb -Tool 'pi'
+        Assert-Match $pi.CliArgs '--approve' 'pi uses --approve'
+    }
+
+    It 'names a session on every harness that can name one' {
+        $sb = New-Sandbox
+        foreach ($tool in @('claude', 'pi')) {
+            $proj = New-Project -Sandbox $sb -Name $tool
+            $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @($tool, 'start', 'fix-login')
+            $call = Get-LastHarnessCall -Sandbox $sb -Tool $tool
+            Assert-Match $call.CliArgs '--name fix-login-\d{6}' ($tool + ' must be told the session name')
+        }
+    }
+
+    It 'sends no name to opencode, which cannot name a session' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('opencode', 'start', 'fix-login')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'opencode'
+        Assert-NoMatch $call.CliArgs '--name' 'opencode has no naming flag, so none may be invented'
+    }
+
+    It 'still requires a name, whichever harness is used' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start')
+        Assert-NoMatch $r.ExitCode '^0$' 'a nameless start must be refused on any harness'
+        Assert-Match $r.Output '(?i)name is required' 'and must say so'
+    }
+
+    It 'redirects only copilot, which is the one that pools sessions globally' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal (Join-Path $proj '.copilot') $call.Home 'COPILOT_HOME must still point at the project'
+    }
+
+    It 'leaves claude and opencode on their own state, which is already per-directory' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        foreach ($tool in @('claude', 'opencode')) {
+            $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @($tool, 'start', 'work')
+            $call = Get-LastHarnessCall -Sandbox $sb -Tool $tool
+            Assert-Equal '' $call.Home ($tool + ' keeps sessions per directory already, so nothing is redirected')
+            Assert-Equal '' $r.Leaks 'no isolation variable may be left set in the calling shell'
+        }
+    }
+
+    It 'gives pi a session directory inside the project' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('pi', 'start', 'work')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'pi'
+        Assert-Match $call.CliArgs '--session-dir' 'pi is pointed at a session directory'
+        Assert-True ($call.ArgList -contains (Join-Path $proj '.pi')) `
+            ("pi's session directory must sit in the project, got: " + ($call.ArgList -join ' '))
+    }
+
+    It 'uses copilot when no harness is named' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Equal 'copilot' $call.Tool 'the default harness is copilot'
+    }
+
+    It 'takes the default harness from config' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('config', 'harness', 'claude')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Match $call.CliArgs '--name work-\d{6}' 'the configured default harness must be used'
+    }
+
+    It 'reports the configured harness' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('config', 'harness', 'pi')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('config')
+        Assert-Match $r.Output 'harness' 'config must list the harness setting'
+        Assert-Match $r.Output 'pi' 'and show the configured value'
+    }
+
+    It 'refuses an unknown harness and names the ones it supports' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('gemini', 'start', 'work')
+        Assert-NoMatch $r.ExitCode '^0$' 'an unknown harness must exit non-zero'
+        Assert-Match $r.Output '(?i)copilot' 'the error must list copilot'
+        Assert-Match $r.Output '(?i)claude' 'and claude'
+        Assert-Match $r.Output '(?i)opencode' 'and opencode'
+    }
+
+    It 'refuses an unknown harness as a config value too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('config', 'harness', 'gemini')
+        Assert-NoMatch $r.ExitCode '^0$' 'an unsupported harness must be rejected'
+    }
+
+    It 'passes extra arguments through to the chosen harness' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work', '--model', 'opus')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-True ($call.ArgList -contains '--model') 'extra arguments must reach the harness'
+        Assert-True ($call.ArgList -contains 'opus') 'and keep their values'
+    }
+
+    It 'selects a harness from cmd.exe too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work') -Shell cmd
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Match $call.CliArgs '--name work-\d{6}' 'the harness must be selected through cmd.exe as well'
+        Assert-Equal $proj $call.Cwd 'and run in the project directory'
+    }
+
+    It 'continues with the harness the folder was last started with' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Match $call.CliArgs '--continue' 'continue must go to the harness the folder was started with'
     }
 }
 
