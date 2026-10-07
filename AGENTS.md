@@ -39,7 +39,8 @@ The essentials, so that even a tool which never loads the skill does no harm.
 - **Splat arguments from a variable.** `@(...)` is the array subexpression
   operator, not splatting, and collapses the whole list into one argument.
 - **`forget` and `prune` never delete a `.copilot` folder**, and workspace ids
-  are never renumbered or reused.
+  are never renumbered or reused. Session ids are stable in the same way: a
+  number is reserved before the session exists and is never handed out twice.
 - **Active means a process genuinely exists** and started no later than its lock
   file was written. Lock files outlive crashes and process ids get recycled.
 - **PowerShell 5.1 must keep working**, and no machine-specific absolute paths

@@ -121,19 +121,54 @@ rest.
 silently retarget a remembered id at a different project — a dangerous failure,
 since `resume` then opens the wrong repository.
 
-### 3.3 Session numbers are positions, not identities
+### 3.3 Session ids are stable, and live in the session's own name
 
-`001002` means "the second entry in that workspace's current list", resolved to
-a real session uuid at the moment you resume.
+`myco start <name>` is the only way to start a session. The name is slugified
+and joined to the next number for that workspace, and the result —
+`split-billing-001002` — is passed to Copilot as `--name`. `resume` accepts
+that whole string or just the digits.
 
-**Why.** Copilot session ids are uuids; nobody types those. Positions are
-short and stable enough for the intended "list, then resume" flow.
+**Why the name is mandatory.** The id has to be fixed when the session is
+created, and the only thing that can carry it for the life of the session is
+Copilot's own session metadata. There is no second moment to ask.
 
-**Known trade-off.** Positions shift as new sessions appear. This is documented
-in the README rather than engineered away, because the alternative — a second
-persistent id space that myco would have to keep synchronised with Copilot's
-own session store — is a great deal of machinery for a list the user is looking
-at anyway.
+**Why this works at all.** The real Copilot CLI has `-n, --name`, stores it in
+the session's `workspace.yaml` as `name:` with `user_named: true`, and matches
+it exactly and case-insensitively in `--resume`. myco therefore keeps no
+parallel id store: *the session carries its own id*, and a folder copied
+somewhere else brings its ids with it.
+
+**Why the number is reserved, not derived.** The counter is `nextSession` on
+the workspace record, incremented under the registry lock before Copilot is
+launched, with the highest number already present in the folder as its floor.
+So a number survives its session being deleted, and a registry restored from a
+backup still cannot issue it twice. The floor also means a workspace registered
+before this existed starts numbering above whatever is already on disk.
+
+**This reverses an earlier decision.** Session numbers used to be list
+positions, and the shifting was documented as a known trade-off rather than
+fixed, on the grounds that a second id space would be machinery for a list the
+user is looking at anyway. Naming changed the economics: an id embedded in a
+name that silently retargets is worse than no name at all, and because Copilot
+names sessions itself, the "second id space" turned out to cost one field in
+the registry and nothing else.
+
+**Sessions myco did not name** — plain `copilot` runs, anything predating this
+— still fall back to list position, skipping any number a named session holds
+so two rows can never share an id. Dropping them would hide real work.
+
+The match is deliberately case-sensitive (`-cmatch`) against the slug shape, so
+only names myco actually wrote are read as ids and a Copilot summary that
+happens to end in six digits is left alone.
+
+### 3.3a Only the digits address a session
+
+`resume split-billing-001002` and `resume 001002` are the same command. The
+slug is for the reader; it is never matched on.
+
+**Why.** Two sessions can be given the same name on purpose — two attempts at
+the same job — and a user who renames a session in Copilot would otherwise
+break an id they had written down.
 
 ### 3.4 Atomic writes under a named mutex
 
@@ -459,6 +494,24 @@ than reality. A real session displayed as `what does ''active'' require`.
 
 **Lesson, again.** A fixture that is cleaner than the real artefact hides real
 bugs — the same way the missing `copilot.ps1` stub did in 2.6.
+
+### 10.1a `session-state` holds things that are not sessions
+
+The real CLI keeps `.session-operation-locks` in `session-state`, beside the
+sessions. myco skips dot-prefixed directories there.
+
+**The symptom.** It has no `workspace.yaml` and is touched constantly, so it
+listed as a nameless session, sorted to the top, and took the first id —
+pushing every real session down by one.
+
+**The rule is narrow on purpose.** Only the leading dot disqualifies a folder.
+A directory without `workspace.yaml` is still treated as a session, so one
+interrupted before it wrote its metadata is not silently dropped.
+
+**Found by the live check, not the suite.** The stub never created the folder,
+so 115 tests passed over it. It surfaced the moment one `myco start` against
+the real CLI appeared to create two sessions — the third bug in this file found
+only by running the real tool.
 
 ### 10.2 myco trusts each workspace folder in its own `.copilot`
 

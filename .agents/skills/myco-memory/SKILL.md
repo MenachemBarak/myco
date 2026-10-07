@@ -53,6 +53,10 @@ Do not read all three speculatively. Each is self-contained.
 `start`, `continue`, `sessions`, `resume`, `recover`, `status`, `config`,
 `forget`, `prune`, `version`, `help`.
 
+`start` takes a mandatory name: `myco start <name>` becomes a session called
+`<slug>-<id>`, resumable by that or by the bare id. `continue` takes no name —
+it resumes the most recent session.
+
 `recover` reopens every session touched in a window — two hours by default,
 `--hours=<n>` to change — as one Windows Terminal tab each. It is the only
 command that needs `wt`. It never reopens a session that already has a live
@@ -87,6 +91,15 @@ breaking them.
   single argument against the npm `copilot.ps1` shim.
 - **Workspace ids are stable and never reused.** `forget` and `prune` must not
   renumber survivors, because users keep ids in their heads and in notes.
+- **Session ids are stable too, and the session carries its own.** `myco start`
+  requires a name; it is slugified, joined to a number reserved in the registry
+  before Copilot launches, and passed to Copilot as `--name`. A number is never
+  reused, even after its session is deleted. Do not reduce this back to a list
+  position — an id inside a name that silently retargets is worse than no name.
+- **Only the digits address a session.** `split-billing-001002` and `001002`
+  are the same command; the slug is for the reader and is never matched on.
+- **`session-state` contains things that are not sessions.** The CLI keeps
+  `.session-operation-locks` there; dot-prefixed directories are skipped.
 - **`forget` and `prune` touch the registry only.** They must never delete a
   `.copilot` folder.
 - **An unreadable registry is set aside, never overwritten**, so a corrupt file

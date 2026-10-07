@@ -12,31 +12,35 @@ into any recent session with a short id.
 
 ┌─ [001] checkout-service (created) ───────────────────────────────────────────┐
 │ D:\work\checkout-service                                                     │
-├──────────┬──────────┬──────────────┬─────────────────────────────────────────┤
-│ ID       │ STATUS   │ WHEN         │ SESSION                                 │
-├──────────┼──────────┼──────────────┼─────────────────────────────────────────┤
-│ 001001   │ ● active │ 3 min ago    │ Fix the redirect loop after login       │
-│ 001002   │          │ 5 hours ago  │ Split the billing module                │
-│ 001003   │          │ 2 days ago   │ Add contract tests                      │
-└──────────┴──────────┴──────────────┴─────────────────────────────────────────┘
+├──────────────────────┬──────────┬──────────────┬─────────────────────────────┤
+│ ID                   │ STATUS   │ WHEN         │ SESSION                     │
+├──────────────────────┼──────────┼──────────────┼─────────────────────────────┤
+│ redirect-loop-001003 │ ● active │ 3 min ago    │ redirect-loop               │
+│ split-billing-001002 │          │ 5 hours ago  │ split-billing               │
+│ contract-tests-001001│          │ 2 days ago   │ contract-tests              │
+└──────────────────────┴──────────┴──────────────┴─────────────────────────────┘
 
 ┌─ [002] design-system (adopted) ──────────────────────────────────────────────┐
 │ D:\work\design-system                                                        │
-├──────────┬──────────┬──────────────┬─────────────────────────────────────────┤
-│ ID       │ STATUS   │ WHEN         │ SESSION                                 │
-├──────────┼──────────┼──────────────┼─────────────────────────────────────────┤
-│ 002001   │          │ 2026-09-15   │ Token naming pass                       │
-└──────────┴──────────┴──────────────┴─────────────────────────────────────────┘
+├──────────────────────┬──────────┬──────────────┬─────────────────────────────┤
+│ ID                   │ STATUS   │ WHEN         │ SESSION                     │
+├──────────────────────┼──────────┼──────────────┼─────────────────────────────┤
+│ token-naming-002001  │          │ 2026-09-15   │ token-naming                │
+└──────────────────────┴──────────┴──────────────┴─────────────────────────────┘
 
   ● active = a Copilot process is running.  Resume with: myco resume <id>
 ```
 
 ```console
-> myco resume 001002
+> myco start "split billing"
+myco [001] checkout-service  split-billing-001002  (created)
+
+> myco resume split-billing-001002
 ```
 
 …moves your shell into `D:\work\checkout-service` and reopens that exact
-session.
+session. `myco resume 001002` does the same thing; the words are there for you,
+the digits are what addresses the session.
 
 The table adapts to your terminal width, and degrades one character at a time
 on a legacy code page: `cmd.exe` on code page 437 keeps the borders but shows
@@ -97,8 +101,8 @@ never touched.
 
 | Command | What it does |
 | --- | --- |
-| `myco start [copilot args]` | Creates `.\.copilot` if missing, registers the folder, runs `copilot --yolo`. |
-| `myco continue [copilot args]` | Same, but runs `copilot --yolo --continue`. |
+| `myco start <name> [copilot args]` | Creates `.\.copilot` if missing, registers the folder, and runs `copilot --yolo --name <name>-<id>`. The name is required. |
+| `myco continue [copilot args]` | Resumes this folder's most recent session: `copilot --yolo --continue`. No name needed. |
 | `myco sessions` | Lists every registered folder as a table, with its id, the last 15 sessions and which are running. Aliases: `ls`, `list`. |
 | `myco resume <id>` | Moves your shell into the folder and resumes. |
 | `myco recover [options]` | Reopens every session touched recently, one Windows Terminal tab each. |
@@ -111,7 +115,7 @@ never touched.
 Anything you add after the subcommand is passed straight through to Copilot:
 
 ```console
-myco start --model gpt-5.4
+myco start refund-flow --model gpt-5.4
 myco continue --add-dir ..\shared
 ```
 
@@ -153,25 +157,47 @@ with `--dry-run` if you want to see the set first.
 Windows Terminal is required for this one command; everything else in myco
 works without it.
 
+## Naming and ids
+
 Folders get a three-digit id in the order you first use them: `001`, `002`, …
-Sessions are numbered inside their folder, most recently updated first, so
-`001002` is the second-newest session of folder `001`.
+
+Every session is named when you start it. myco slugifies the name you give and
+appends the next session number for that folder, so the session is addressable
+as `split-billing-001002` for as long as it exists:
+
+```console
+> myco start "Split the billing module"
+myco [001] checkout-service  split-billing-001002  (created)
+```
+
+That name is real Copilot session metadata, not a myco label — it is what
+`copilot --resume` matches on, and it is stored in the session's own
+`workspace.yaml`.
 
 | Form | Meaning |
 | --- | --- |
+| `myco resume split-billing-001002` | That exact session. |
+| `myco resume 001002` | The same session; only the digits address it. |
 | `myco resume 001` | The folder's most recent session (`--continue`). |
-| `myco resume 001002` | That folder's second-newest listed session. |
-| `myco resume 001.002` | Same thing; `.`, `-` and `_` separators are accepted. |
+| `myco resume 001.002` | `.`, `-` and `_` separators are accepted in the digits. |
 | `myco resume <uuid or name>` | Anything that is not a myco id is handed to `copilot --resume` for the current folder. |
 
-Session numbers are positions in the list, so they shift as new sessions appear.
-Run `myco sessions` first, then resume. Folder ids never change and are never
-reused, so `myco forget 001` does not renumber `002`.
+**A session number is assigned once and never reused.** It is reserved before
+the session exists, and the highest number already in the folder is its floor,
+so deleting a session does not free its number and a restored registry cannot
+hand the same number out twice. An id you wrote down keeps meaning one
+conversation. The same is true of folder ids, which is why `myco forget 001`
+never renumbers `002`.
+
+Sessions that myco did not name — a plain `copilot` run, or anything from
+before this scheme — are still listed and still resumable. They fall back to
+their position in the list, skipping any number a named session already holds,
+so no two rows ever share an id.
 
 ## Discovery
 
-`myco` only registers folders you actually use it in. Running `myco start` or
-`myco continue` in a folder that already has a `.copilot` directory adopts it —
+`myco` only registers folders you actually use it in. Running `myco start <name>`
+or `myco continue` in a folder that already has a `.copilot` directory adopts it —
 the existing directory is listed as `adopted` and is never modified or seeded.
 There is no background scanning of your disk.
 
