@@ -479,7 +479,7 @@ Describe 'myco start' {
     It 'creates a .copilot folder in the current directory when none exists' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-True (Test-Path -LiteralPath (Join-Path $proj '.copilot')) `
             "expected .copilot to be created in the project folder. Output:`n$($r.Output)"
     }
@@ -487,7 +487,7 @@ Describe 'myco start' {
     It 'launches copilot with --yolo, in the project directory, with COPILOT_HOME redirected' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $call = Get-LastCopilotCall -Sandbox $sb
         Assert-Match $call.CliArgs '--yolo' 'copilot must be launched with --yolo'
         Assert-Equal $proj $call.Cwd 'copilot must run in the project directory'
@@ -497,7 +497,7 @@ Describe 'myco start' {
     It 'registers the project as workspace 001 on first use' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-Match $r.Output '\[001\]' 'first workspace must be listed with id 001'
     }
@@ -506,8 +506,8 @@ Describe 'myco start' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions')
         Assert-Match $r.Output '\[001\]' 'workspace 001 must be listed'
         Assert-Match $r.Output '\[002\]' 'workspace 002 must be listed'
@@ -519,7 +519,7 @@ Describe 'myco start' {
         New-Item -ItemType Directory -Force -Path (Join-Path $proj '.copilot') | Out-Null
         $marker = Join-Path $proj '.copilot\marker.txt'
         Set-Content -LiteralPath $marker -Value 'preexisting' -Encoding ASCII
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-True (Test-Path -LiteralPath $marker) 'an existing .copilot must not be clobbered'
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-Match $r.Output 'adopted' 'a pre-existing .copilot must be recorded as adopted'
@@ -528,8 +528,8 @@ Describe 'myco start' {
     It 'registers a project only once across repeated runs' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '\[002\]' 'the same folder must not be registered twice'
     }
@@ -537,7 +537,7 @@ Describe 'myco start' {
     It 'forwards extra arguments through to copilot' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work', '--model', 'gpt-5.4')
         $call = Get-LastCopilotCall -Sandbox $sb
         Assert-Match $call.CliArgs '--model gpt-5\.4' 'extra arguments must be forwarded to copilot'
     }
@@ -545,27 +545,29 @@ Describe 'myco start' {
     It 'passes every argument to copilot separately, never as one string' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work', '--model', 'gpt-5.4')
         $call = Get-LastCopilotCall -Sandbox $sb
-        Assert-Equal 3 $call.ArgList.Count `
-            ("copilot must receive three separate arguments, got: " + (($call.ArgList | ForEach-Object { "<$_>" }) -join ' '))
+        Assert-Equal 5 $call.ArgList.Count `
+            ("copilot must receive five separate arguments, got: " + (($call.ArgList | ForEach-Object { "<$_>" }) -join ' '))
         Assert-Equal '--yolo' $call.ArgList[0] 'first argument must be --yolo'
-        Assert-Equal '--model' $call.ArgList[1] 'second argument must be --model'
-        Assert-Equal 'gpt-5.4' $call.ArgList[2] 'third argument must be the model name'
+        Assert-Equal '--name' $call.ArgList[1] 'second argument must be --name'
+        Assert-Equal 'work-001001' $call.ArgList[2] 'third argument must be the session name'
+        Assert-Equal '--model' $call.ArgList[3] 'fourth argument must be --model'
+        Assert-Equal 'gpt-5.4' $call.ArgList[4] 'fifth argument must be the model name'
     }
 
     It 'keeps an argument containing spaces as a single argument' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '-p', 'do the thing')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work', '-p', 'do the thing')
         $call = Get-LastCopilotCall -Sandbox $sb
-        Assert-Equal 3 $call.ArgList.Count 'a quoted prompt must stay one argument'
-        Assert-Equal 'do the thing' $call.ArgList[2] 'the prompt text must survive intact'
+        Assert-Equal 5 $call.ArgList.Count 'a quoted prompt must stay one argument'
+        Assert-Equal 'do the thing' $call.ArgList[4] 'the prompt text must survive intact'
     }
 
     It 'creates .copilot in the home folder too, when it is missing' {
         $sb = New-Sandbox
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start', 'work')
         Assert-True (Test-Path -LiteralPath (Join-Path $sb.UserProfile '.copilot')) `
             "myco start must create .copilot wherever it is run. Output:`n$($r.Output)"
         Assert-Equal '0' $r.ExitCode 'starting in the home folder is not an error'
@@ -575,7 +577,7 @@ Describe 'myco start' {
         $sb = New-Sandbox
         $globalHome = Join-Path $sb.UserProfile '.copilot'
         New-Item -ItemType Directory -Force -Path $globalHome | Out-Null
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start', 'work')
         Assert-Equal '0' $r.ExitCode 'the home folder must be usable'
         $call = Get-LastCopilotCall -Sandbox $sb
         Assert-Equal $globalHome $call.Home 'COPILOT_HOME must point at the home .copilot'
@@ -585,7 +587,7 @@ Describe 'myco start' {
 
     It 'never seeds a new .copilot from itself' {
         $sb = New-Sandbox
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.UserProfile -MycoArgs @('start', 'work')
         Assert-Equal '0' $r.ExitCode 'creating the home .copilot must not error'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $sb.UserProfile '.copilot\.copilot'))) `
             'seeding must never copy a folder into itself'
@@ -595,7 +597,7 @@ Describe 'myco start' {
     It 'still refuses to create a workspace at a drive root' {
         $sb = New-Sandbox
         $root = [System.IO.Path]::GetPathRoot($sb.Root)
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $root -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $root -MycoArgs @('start', 'work')
         Assert-Match $r.Output '(?i)drive root' 'must explain why a drive root is refused'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit with a non-zero status'
     }
@@ -603,8 +605,205 @@ Describe 'myco start' {
     It 'does not leak COPILOT_HOME into the calling shell' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-Equal '' $r.Leak 'COPILOT_HOME must be restored after copilot exits'
+    }
+}
+
+Describe 'myco start names' {
+
+    It 'refuses to start without a name' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        Assert-NoMatch $r.ExitCode '^0$' 'starting without a name must exit non-zero'
+        Assert-Match $r.Output '(?i)name' 'the error must say that a name is required'
+    }
+
+    It 'refuses a name that slugifies to nothing' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '!!!')
+        Assert-NoMatch $r.ExitCode '^0$' 'a name with no usable characters must be refused'
+        Assert-Match $r.Output '(?i)name' 'the error must mention the name'
+    }
+
+    It 'treats a leading option as a missing name rather than a name' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4')
+        Assert-NoMatch $r.ExitCode '^0$' 'an option cannot stand in for the name'
+        Assert-Match $r.Output '(?i)name' 'the error must say that a name is required'
+    }
+
+    It 'names the new session <slug>-<id> and hands it to copilot' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'fix-login')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs '--name fix-login-001001' 'copilot must be told the session name'
+    }
+
+    It 'slugifies case, spacing and punctuation' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'Fix the  LOGIN_loop!')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs '--name fix-the-login-loop-001001' 'the name must be slugified'
+    }
+
+    It 'slugifies a spaced name from cmd.exe too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'Fix the login loop') -Shell cmd
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs '--name fix-the-login-loop-001001' 'the name must survive cmd.exe quoting'
+    }
+
+    It 'tells the user the id it assigned' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'fix-login')
+        Assert-Match $r.Output 'fix-login-001001' 'start must print the id it just assigned'
+    }
+
+    It 'gives each new session the next number in the workspace' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'one')
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'two')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs '--name two-001002' 'the second session must take the next number'
+    }
+
+    It 'numbers sessions per workspace, not globally' {
+        $sb = New-Sandbox
+        $a = New-Project -Sandbox $sb -Name 'alpha'
+        $b = New-Project -Sandbox $sb -Name 'beta'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'one')
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'one')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs '--name one-002001' 'a second workspace starts its own numbering'
+    }
+
+    It 'never reuses a number after the session is deleted' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $ch = Join-Path $proj '.copilot'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'one')
+        $gone = New-FakeSession -CopilotHome $ch -Name 'one-001001' -UpdatedAt (Get-Date)
+        Remove-Item -LiteralPath (Join-Path $ch ('session-state\' + $gone)) -Recurse -Force
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'two')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-NoMatch $call.CliArgs '--name two-001001' 'a deleted number must never come back'
+        Assert-Match $call.CliArgs '--name two-001002' 'the counter must carry on past the deleted session'
+    }
+
+    It 'shows the name-and-id in the sessions table' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'fix-login-001001' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        $ids = @(Get-TableRow -Text $r.Output | ForEach-Object { if ($_ -match '^\s*[\u2502|]\s*(\S+)\s*[\u2502|]') { $Matches[1] } })
+        Assert-True ($ids -contains 'fix-login-001001') `
+            ("the ID column must hold the full name-and-id, got: " + ($ids -join ', '))
+    }
+
+    It 'keeps a session id stable when newer sessions arrive' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'alpha-001001' -UpdatedAt (Get-Date).AddDays(-3)
+        $null = New-FakeSession -CopilotHome $ch -Name 'beta-001002' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        $ids = @(Get-TableRow -Text $r.Output | ForEach-Object { if ($_ -match '^\s*[\u2502|]\s*(\S+)\s*[\u2502|]') { $Matches[1] } })
+        Assert-True ($ids -contains 'alpha-001001') `
+            ("the older session must keep the id it was given, got: " + ($ids -join ', '))
+        Assert-True ($ids -contains 'beta-001002') `
+            ("the newer session must keep its own id, got: " + ($ids -join ', '))
+        Assert-NoMatch ($ids -join ' ') 'alpha-001002' 'an id must never be renumbered by recency'
+    }
+
+    It 'resumes by the full name-and-id' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'beta-001002' -UpdatedAt (Get-Date)
+        $target = New-FakeSession -CopilotHome $ch -Name 'alpha-001001' -UpdatedAt (Get-Date).AddDays(-3)
+        Clear-CopilotCalls -Sandbox $sb
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', 'alpha-001001')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs ([regex]::Escape($target)) 'the named session uuid must be resumed'
+        Assert-Equal $proj $r.FinalCwd 'the shell must be left inside the workspace directory'
+    }
+
+    It 'resumes the same session by the bare id' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'beta-001002' -UpdatedAt (Get-Date)
+        $target = New-FakeSession -CopilotHome $ch -Name 'alpha-001001' -UpdatedAt (Get-Date).AddDays(-3)
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001001')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs ([regex]::Escape($target)) 'the bare id must reach the same session'
+    }
+
+    It 'resolves the stable id ahead of the list position' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $newest = New-FakeSession -CopilotHome $ch -Name 'beta-001002' -UpdatedAt (Get-Date)
+        $target = New-FakeSession -CopilotHome $ch -Name 'alpha-001001' -UpdatedAt (Get-Date).AddDays(-3)
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001002')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs ([regex]::Escape($newest)) 'id 001002 must be the session named beta-001002'
+        Assert-NoMatch $call.CliArgs ([regex]::Escape($target)) 'the list position must not win over the id'
+    }
+
+    It 'reports an id that no session carries' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'alpha-001001' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('resume', 'ghost-001009')
+        Assert-NoMatch $r.ExitCode '^0$' 'an unknown name-and-id must exit non-zero'
+        Assert-Match $r.Output '(?i)(no session|has only|unknown)' 'must report the missing session'
+    }
+
+    It 'still numbers sessions it did not name by position' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Newest work' -UpdatedAt (Get-Date).AddMinutes(-1)
+        $null = New-FakeSession -CopilotHome $ch -Name 'Older work' -UpdatedAt (Get-Date).AddHours(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '001001[^\r\n]*Newest work' 'a session myco never named keeps a positional id'
+        Assert-Match $r.Output '001002[^\r\n]*Older work' 'positional ids carry on down the list'
+    }
+
+    It 'never gives an unnamed session a number a named one already holds' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Foreign work' -UpdatedAt (Get-Date)
+        $null = New-FakeSession -CopilotHome $ch -Name 'alpha-001001' -UpdatedAt (Get-Date).AddHours(-1)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '001002[^\r\n]*Foreign work' 'the taken number must be skipped'
+        Assert-Match $r.Output 'alpha-001001' 'the named session keeps its number'
     }
 }
 
@@ -633,7 +832,7 @@ Describe 'myco sessions' {
     It 'nests session ids under their workspace id' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Newest work' -UpdatedAt (Get-Date).AddMinutes(-1)
         $null = New-FakeSession -CopilotHome $ch -Name 'Older work' -UpdatedAt (Get-Date).AddHours(-5)
@@ -646,7 +845,7 @@ Describe 'myco sessions' {
     It 'orders sessions most-recent first' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'OLDEST' -UpdatedAt (Get-Date).AddDays(-3)
         $null = New-FakeSession -CopilotHome $ch -Name 'NEWEST' -UpdatedAt (Get-Date)
@@ -657,7 +856,7 @@ Describe 'myco sessions' {
     It 'shows at most the last 15 sessions per workspace' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         for ($i = 1; $i -le 18; $i++) {
             $null = New-FakeSession -CopilotHome $ch -Name ("Session $i") -UpdatedAt (Get-Date).AddMinutes(-$i)
@@ -670,7 +869,7 @@ Describe 'myco sessions' {
     It 'marks a session whose process is still running as active' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Live one' -UpdatedAt (Get-Date) `
@@ -682,7 +881,7 @@ Describe 'myco sessions' {
     It 'does not mark a session whose process has exited' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $dead = Start-TestProcess
         $deadId = $dead.Id
@@ -697,7 +896,7 @@ Describe 'myco sessions' {
     It 'does not mistake a recycled process id for a running session' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         # The lock predates this process, so the process cannot be its author;
@@ -711,7 +910,7 @@ Describe 'myco sessions' {
     It 'counts only genuinely running sessions in the summary' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Running' -UpdatedAt (Get-Date) `
@@ -736,7 +935,7 @@ Describe 'myco sessions' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         New-Item -ItemType Directory -Force -Path (Join-Path $sb.UserProfile '.copilot') | Out-Null
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '\[000\]' 'the global copilot home must never be listed'
     }
@@ -747,7 +946,7 @@ Describe 'myco sessions presentation' {
     It 'renders sessions as an aligned table' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Short' -UpdatedAt (Get-Date)
         $null = New-FakeSession -CopilotHome $ch -Name 'A considerably longer session name' -UpdatedAt (Get-Date).AddHours(-2)
@@ -761,7 +960,7 @@ Describe 'myco sessions presentation' {
     It 'labels the session columns' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Some work' -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-Match $r.Output '(?i)\bID\b' 'the id column must be labelled'
@@ -773,8 +972,8 @@ Describe 'myco sessions presentation' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions')
         Assert-Match $r.Output '(?i)2 workspaces' 'the summary must count the workspaces'
         Assert-Match $r.Output '(?i)0 active' 'the summary must report how many sessions are running'
@@ -783,7 +982,7 @@ Describe 'myco sessions presentation' {
     It 'shows how long ago a session was last updated' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Recent' -UpdatedAt (Get-Date).AddMinutes(-5)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
@@ -793,7 +992,7 @@ Describe 'myco sessions presentation' {
     It 'keeps long session names inside the table' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $long = 'x' * 300
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name $long -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
@@ -808,7 +1007,7 @@ Describe 'myco sessions presentation' {
     It 'still renders when output is redirected and no console width exists' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Piped' -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '(?i)handle is invalid|WindowWidth|exception' 'width lookup must not fail when piped'
@@ -818,7 +1017,7 @@ Describe 'myco sessions presentation' {
     It 'emits nothing a legacy code page cannot render' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Legacy shell' -UpdatedAt (Get-Date) `
@@ -835,7 +1034,7 @@ Describe 'myco sessions presentation' {
     It 'keeps box drawing on a legacy code page that supports it' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Legacy shell' -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 437
         Assert-Match $r.Output '[\u2500-\u257F]' 'code page 437 has the box drawing set, so it should be used'
@@ -844,7 +1043,7 @@ Describe 'myco sessions presentation' {
     It 'uses box drawing when the code page supports it' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Modern shell' -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 65001
         Assert-Match $r.Output '[\u2500-\u257F]' 'a utf-8 console should get box drawing characters'
@@ -854,7 +1053,7 @@ Describe 'myco sessions presentation' {
     It 'shows an apostrophe in a session name exactly once' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') `
             -Name "Fix the user's login" -UpdatedAt (Get-Date)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
@@ -866,8 +1065,8 @@ Describe 'myco sessions presentation' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
         Remove-Item -LiteralPath $b -Recurse -Force
         $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions')
         Assert-Match $r.Output '(?i)no sessions' 'an empty but present workspace must say so'
@@ -880,7 +1079,7 @@ Describe 'myco resume' {
     It 'moves the shell into the workspace and resumes the chosen session' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Newer' -UpdatedAt (Get-Date)
         $target = New-FakeSession -CopilotHome $ch -Name 'Older' -UpdatedAt (Get-Date).AddHours(-2)
@@ -897,7 +1096,7 @@ Describe 'myco resume' {
     It 'resumes the most recent session when given a bare workspace id' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Clear-CopilotCalls -Sandbox $sb
         $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001')
         $call = Get-LastCopilotCall -Sandbox $sb
@@ -908,7 +1107,7 @@ Describe 'myco resume' {
     It 'accepts dotted id forms' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $target = New-FakeSession -CopilotHome $ch -Name 'Only' -UpdatedAt (Get-Date)
         Clear-CopilotCalls -Sandbox $sb
@@ -920,7 +1119,7 @@ Describe 'myco resume' {
     It 'fails clearly for an unknown workspace id' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('resume', '099')
         Assert-Match $r.Output '(?i)(unknown|no workspace)' 'must report the unknown id'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
@@ -929,7 +1128,7 @@ Describe 'myco resume' {
     It 'fails clearly for an out-of-range session index' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('resume', '001009')
         Assert-Match $r.Output '(?i)(no session|out of range|has only)' 'must report the missing session'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
@@ -938,7 +1137,7 @@ Describe 'myco resume' {
     It 'reports a workspace whose folder has disappeared' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Remove-Item -LiteralPath $proj -Recurse -Force
         $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001')
         Assert-Match $r.Output '(?i)(missing|not found|no longer)' 'must report the vanished folder'
@@ -951,7 +1150,7 @@ Describe 'myco recover' {
     It 'opens one Windows Terminal tab per session from the last two hours' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Recent one' -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = New-FakeSession -CopilotHome $ch -Name 'Recent two' -UpdatedAt (Get-Date).AddMinutes(-90)
@@ -963,7 +1162,7 @@ Describe 'myco recover' {
     It 'gives each tab the workspace folder and the exact session id' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $target = New-FakeSession -CopilotHome $ch -Name 'Recent one' -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
@@ -976,7 +1175,7 @@ Describe 'myco recover' {
     It 'passes no argument containing a semicolon to Windows Terminal' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
             -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
@@ -990,7 +1189,7 @@ Describe 'myco recover' {
     It 'survives a session name containing a semicolon' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Fix this; then that' `
             -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
@@ -1003,7 +1202,7 @@ Describe 'myco recover' {
     It 'starts each tab from a script file rather than an inline command' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
             -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
@@ -1018,7 +1217,7 @@ Describe 'myco recover' {
     It 'titles each tab with the session name' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Fix the login loop' `
             -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
@@ -1030,7 +1229,7 @@ Describe 'myco recover' {
     It 'leaves out sessions older than the window' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Inside window' -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = New-FakeSession -CopilotHome $ch -Name 'Way too old' -UpdatedAt (Get-Date).AddHours(-9)
@@ -1042,7 +1241,7 @@ Describe 'myco recover' {
     It 'widens the window with --hours' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Inside window' -UpdatedAt (Get-Date).AddMinutes(-10)
         $null = New-FakeSession -CopilotHome $ch -Name 'Five hours back' -UpdatedAt (Get-Date).AddHours(-5)
@@ -1053,7 +1252,7 @@ Describe 'myco recover' {
     It 'accepts --hours as a separate argument' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $null = New-FakeSession -CopilotHome $ch -Name 'Five hours back' -UpdatedAt (Get-Date).AddHours(-5)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--hours', '8')
@@ -1063,7 +1262,7 @@ Describe 'myco recover' {
     It 'rejects a nonsense --hours value' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--hours=soon')
         Assert-Match $r.Output '(?i)hours' 'must name the offending option'
         Assert-NoMatch $r.ExitCode '^0$' 'must exit non-zero'
@@ -1073,7 +1272,7 @@ Describe 'myco recover' {
     It 'never reopens a session whose process is already running' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Still running' -UpdatedAt (Get-Date).AddMinutes(-5) `
@@ -1087,7 +1286,7 @@ Describe 'myco recover' {
     It 'says how many sessions it left running' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         foreach ($n in @('Live one', 'Live two')) {
             $live = Start-TestProcess
@@ -1103,7 +1302,7 @@ Describe 'myco recover' {
     It 'explains the skip even when everything is still running' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Live one' -UpdatedAt (Get-Date).AddMinutes(-5) `
@@ -1117,7 +1316,7 @@ Describe 'myco recover' {
     It 'no longer offers a way to reopen running sessions' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $live = Start-TestProcess
         $null = New-FakeSession -CopilotHome $ch -Name 'Still running' -UpdatedAt (Get-Date).AddMinutes(-5) `
@@ -1132,8 +1331,8 @@ Describe 'myco recover' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $a '.copilot') -Name 'From alpha' -UpdatedAt (Get-Date).AddMinutes(-5)
         $null = New-FakeSession -CopilotHome (Join-Path $b '.copilot') -Name 'From beta' -UpdatedAt (Get-Date).AddMinutes(-5)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('recover')
@@ -1146,7 +1345,7 @@ Describe 'myco recover' {
     It 'previews without launching anything under --dry-run' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Would reopen' `
             -UpdatedAt (Get-Date).AddMinutes(-5)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
@@ -1158,7 +1357,7 @@ Describe 'myco recover' {
     It 'refuses to open more tabs than the cap' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         for ($i = 1; $i -le 4; $i++) {
             $null = New-FakeSession -CopilotHome $ch -Name ("Session $i") -UpdatedAt (Get-Date).AddMinutes(-$i)
@@ -1172,7 +1371,7 @@ Describe 'myco recover' {
     It 'says so when nothing needs recovering' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Ancient' -UpdatedAt (Get-Date).AddDays(-3)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
         Assert-Match $r.Output '(?i)nothing to recover|no sessions' 'must report an empty result plainly'
@@ -1183,7 +1382,7 @@ Describe 'myco recover' {
     It 'explains itself when Windows Terminal is missing' {
         $sb = New-Sandbox -WithoutWindowsTerminal
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
             -UpdatedAt (Get-Date).AddMinutes(-5)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover')
@@ -1195,7 +1394,7 @@ Describe 'myco recover' {
     It 'keeps a long session name readable in the recover list' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $long = 'q' * 300
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name $long `
             -UpdatedAt (Get-Date).AddMinutes(-5)
@@ -1218,7 +1417,7 @@ Describe 'myco recover' {
     It 'works from cmd.exe too' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         $null = New-FakeSession -CopilotHome (Join-Path $proj '.copilot') -Name 'Recent one' `
             -UpdatedAt (Get-Date).AddMinutes(-5)
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover') -Shell cmd
@@ -1231,7 +1430,7 @@ Describe 'cross-shell behaviour' {
     It 'works end to end from cmd.exe' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         Assert-True (Test-Path -LiteralPath (Join-Path $proj '.copilot')) `
             "cmd.exe must be able to create the workspace. Output:`n$($r.Output)"
         $call = Get-LastCopilotCall -Sandbox $sb
@@ -1241,7 +1440,7 @@ Describe 'cross-shell behaviour' {
     It 'changes the cmd.exe working directory on resume' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001') -Shell cmd
         Assert-Equal $proj $r.FinalCwd 'cmd.exe must be left in the workspace directory'
     }
@@ -1249,7 +1448,7 @@ Describe 'cross-shell behaviour' {
     It 'does not leak COPILOT_HOME into the cmd.exe session' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         Assert-Equal '' $r.Leak 'COPILOT_HOME must be cleared again in cmd.exe'
     }
 
@@ -1257,8 +1456,8 @@ Describe 'cross-shell behaviour' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start') -Shell cmd
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start') -Shell pwsh
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work') -Shell pwsh
         $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions') -Shell cmd
         Assert-Match $r.Output '\[001\]' 'workspace registered from cmd must be listed'
         Assert-Match $r.Output '\[002\]' 'workspace registered from PowerShell must be listed'
@@ -1267,26 +1466,26 @@ Describe 'cross-shell behaviour' {
     It 'passes arguments separately from cmd.exe too' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '--model', 'gpt-5.4') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work', '--model', 'gpt-5.4') -Shell cmd
         $call = Get-LastCopilotCall -Sandbox $sb
-        Assert-Equal 3 $call.ArgList.Count `
-            ("copilot must receive three separate arguments, got: " + (($call.ArgList | ForEach-Object { "<$_>" }) -join ' '))
-        Assert-Equal 'gpt-5.4' $call.ArgList[2] 'the model name must survive cmd.exe quoting'
+        Assert-Equal 5 $call.ArgList.Count `
+            ("copilot must receive five separate arguments, got: " + (($call.ArgList | ForEach-Object { "<$_>" }) -join ' '))
+        Assert-Equal 'gpt-5.4' $call.ArgList[4] 'the model name must survive cmd.exe quoting'
     }
 
     It 'keeps a spaced argument intact from cmd.exe' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', '-p', 'do the thing') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work', '-p', 'do the thing') -Shell cmd
         $call = Get-LastCopilotCall -Sandbox $sb
-        Assert-Equal 3 $call.ArgList.Count 'a quoted prompt must stay one argument through cmd.exe'
-        Assert-Equal 'do the thing' $call.ArgList[2] 'the prompt text must survive cmd.exe quoting'
+        Assert-Equal 5 $call.ArgList.Count 'a quoted prompt must stay one argument through cmd.exe'
+        Assert-Equal 'do the thing' $call.ArgList[4] 'the prompt text must survive cmd.exe quoting'
     }
 
     It 'leaves no plan file behind after a normal cmd.exe run' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start') -Shell cmd
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work') -Shell cmd
         $left = @(Get-ChildItem -LiteralPath $sb.Temp -Filter 'myco-plan-*.cmd' -File -ErrorAction SilentlyContinue)
         Assert-Equal 0 $left.Count 'the plan file must be removed once it has run'
     }
@@ -1318,7 +1517,7 @@ Describe 'seeding and configuration' {
     It 'stores all myco state under MYCO_HOME' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-True (Test-Path -LiteralPath (Join-Path $sb.MycoHome 'registry.json')) `
             'the registry must live under MYCO_HOME'
     }
@@ -1330,7 +1529,7 @@ Describe 'seeding and configuration' {
         Set-Content -LiteralPath (Join-Path $globalHome 'settings.json') -Value '{"theme":"dark"}' -Encoding ASCII
         Set-Content -LiteralPath (Join-Path $globalHome 'mcp-config.json') -Value '{"mcpServers":{}}' -Encoding ASCII
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $seeded = Join-Path $proj '.copilot\settings.json'
         Assert-True (Test-Path -LiteralPath $seeded) 'settings.json must be seeded into the new workspace'
         Assert-Match (Get-Content -LiteralPath $seeded -Raw) 'dark' 'seeded settings must match the global file'
@@ -1346,7 +1545,7 @@ Describe 'seeding and configuration' {
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         New-Item -ItemType Directory -Force -Path (Join-Path $proj '.copilot') | Out-Null
         Set-Content -LiteralPath (Join-Path $proj '.copilot\settings.json') -Value '{"theme":"mine"}' -Encoding ASCII
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-Match (Get-Content -LiteralPath (Join-Path $proj '.copilot\settings.json') -Raw) 'mine' `
             'an adopted workspace must keep its own settings'
     }
@@ -1358,7 +1557,7 @@ Describe 'seeding and configuration' {
         Set-Content -LiteralPath (Join-Path $globalHome 'settings.json') -Value '{"theme":"dark"}' -Encoding ASCII
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('config', 'seed', 'none')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $proj '.copilot\settings.json'))) `
             'seed=none must leave the new workspace empty'
     }
@@ -1369,7 +1568,7 @@ Describe 'trusted folders' {
     It 'trusts the workspace folder when it creates a .copilot' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $trusted = @(Get-TrustedFolders -CopilotHome (Join-Path $proj '.copilot'))
         Assert-True ($trusted -contains $proj) `
             ('the workspace must be trusted, found: ' + ($trusted -join ' | '))
@@ -1379,7 +1578,7 @@ Describe 'trusted folders' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         New-Item -ItemType Directory -Force -Path (Join-Path $proj '.copilot') | Out-Null
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $trusted = @(Get-TrustedFolders -CopilotHome (Join-Path $proj '.copilot'))
         Assert-True ($trusted -contains $proj) 'an adopted workspace must be trusted as well'
     }
@@ -1387,9 +1586,9 @@ Describe 'trusted folders' {
     It 'adds the trust entry only once' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $trusted = @(Get-TrustedFolders -CopilotHome (Join-Path $proj '.copilot'))
         Assert-Equal 1 @($trusted | Where-Object { $_ -eq $proj }).Count 'the entry must not accumulate'
     }
@@ -1409,7 +1608,7 @@ Describe 'trusted folders' {
   ]
 }
 '@
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $trusted = @(Get-TrustedFolders -CopilotHome $ch)
         Assert-True ($trusted -contains 'D:\somewhere\else') 'an existing trusted folder must survive'
         Assert-True ($trusted -contains $proj) 'the workspace must be added alongside it'
@@ -1432,7 +1631,7 @@ Describe 'trusted folders' {
   ]
 }
 '@
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $raw = Get-Content -LiteralPath $cfgPath -Raw
         Assert-Match $raw '(?m)^//' 'the comment header must be kept'
         # Asserted against the bytes on disk, not a parsed object: PowerShell 7
@@ -1448,7 +1647,7 @@ Describe 'trusted folders' {
     It 'writes trustedFolders as a json array even with one entry' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $raw = Get-Content -LiteralPath (Join-Path $proj '.copilot\config.json') -Raw
         Assert-Match $raw '"trustedFolders"\s*:\s*\[' 'a single entry must still be a json array'
     }
@@ -1456,7 +1655,7 @@ Describe 'trusted folders' {
     It 'trusts the folder when a session is resumed as well' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $ch = Join-Path $proj '.copilot'
         $target = New-FakeSession -CopilotHome $ch -Name 'Some work' -UpdatedAt (Get-Date)
         # A tab opened by recover resumes by uuid, so that path must trust too.
@@ -1471,7 +1670,7 @@ Describe 'trusted folders' {
         $globalHome = Join-Path $sb.UserProfile '.copilot'
         New-Item -ItemType Directory -Force -Path $globalHome | Out-Null
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $globalHome 'config.json'))) `
             'trusting a project must not write into the global copilot home'
     }
@@ -1483,8 +1682,8 @@ Describe 'registry maintenance' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
         Remove-Item -LiteralPath $a -Recurse -Force
         $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('prune')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('sessions')
@@ -1496,8 +1695,8 @@ Describe 'registry maintenance' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
         $b = New-Project -Sandbox $sb -Name 'beta'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
         $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('forget', '001')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '\[001\]' 'the forgotten workspace must be gone'
@@ -1507,7 +1706,7 @@ Describe 'registry maintenance' {
     It 'forget leaves the .copilot folder on disk' {
         $sb = New-Sandbox
         $a = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('start', 'work')
         $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('forget', '001')
         Assert-True (Test-Path -LiteralPath (Join-Path $a '.copilot')) `
             'forget must only affect the registry, never the disk'
@@ -1516,7 +1715,7 @@ Describe 'registry maintenance' {
     It 'survives a corrupt registry file' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         Set-Content -LiteralPath (Join-Path $sb.MycoHome 'registry.json') -Value '{ not json' -Encoding ASCII
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '(?i)unhandled|stack trace' 'a corrupt registry must not crash myco'
@@ -1553,7 +1752,7 @@ Describe 'usability' {
     It 'status describes the current folder' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('status')
         Assert-Match $r.Output '001' 'status must show the workspace id for the current folder'
     }
