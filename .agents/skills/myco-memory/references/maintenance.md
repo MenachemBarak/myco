@@ -74,12 +74,19 @@ release, and after touching launching, argument handling or session state:
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass -File test\Verify-Live.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File test\Verify-Live-Names.ps1
 ```
 
-It creates one real session, runs `myco recover` verbatim, and proves the
-recovered tab actually resumed by waiting for a Copilot process to attach and
-write its lock file. It costs a few AI credits and briefly opens a window,
-which it minimises and then closes.
+`Verify-Live.ps1` creates one real session, runs `myco recover` verbatim, and
+proves the recovered tab actually resumed by waiting for a Copilot process to
+attach and write its lock file. It costs a few AI credits and briefly opens a
+window, which it minimises and then closes.
+
+`Verify-Live-Names.ps1` drives the whole named-session path: `start <name>`,
+the listing, `resume <slug>-<id>`, `resume <id>`, a second start taking the
+next number, and a nameless start being refused. It needs no window. It found
+`.session-operation-locks` — a folder the stub never creates, which the suite
+therefore could not see.
 
 **Never improvise a probe instead.** It is isolated in three dimensions, and
 each one was learned the hard way:
