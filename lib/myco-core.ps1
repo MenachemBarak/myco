@@ -636,6 +636,9 @@ function Get-MycoSessions {
     try { $dirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction Stop) } catch { return @() }
 
     foreach ($dir in $dirs) {
+        # The CLI keeps its own bookkeeping beside the sessions, currently
+        # .session-operation-locks. A dot-prefixed folder is never a session.
+        if ($dir.Name.StartsWith('.')) { continue }
         $sessionId = $dir.Name
         $name = ''
         $updatedAt = $dir.LastWriteTimeUtc
