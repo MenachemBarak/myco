@@ -365,6 +365,22 @@ function Read-MycoRegistry {
             if (($wNames -contains 'harness') -and $w.harness) {
                 if ((Get-MycoHarnessNames) -contains [string]$w.harness) { $harness = [string]$w.harness }
             }
+            # Sessions myco minted an id for. Harnesses that keep a name of
+            # their own need no such record; this is for the ones that do not,
+            # where myco has to remember the mapping itself.
+            $sessionMap = New-Object System.Collections.ArrayList
+            if ($wNames -contains 'sessions') {
+                foreach ($s in @($w.sessions)) {
+                    if (-not $s) { continue }
+                    $sNames = @($s.PSObject.Properties.Name)
+                    if (($sNames -notcontains 'n') -or ($sNames -notcontains 'id')) { continue }
+                    $number = 0
+                    if (-not [int]::TryParse([string]$s.n, [ref]$number)) { continue }
+                    $slug = ''
+                    if (($sNames -contains 'slug') -and $s.slug) { $slug = [string]$s.slug }
+                    [void]$sessionMap.Add([pscustomobject]@{ n = $number; id = [string]$s.id; slug = $slug })
+                }
+            }
             [void]$workspaces.Add([pscustomobject]@{
                     id          = [string]$w.id
                     path        = [string]$w.path
@@ -373,6 +389,7 @@ function Read-MycoRegistry {
                     createdAt   = $createdAt
                     lastUsedAt  = $lastUsedAt
                     nextSession = $nextSession
+                    sessions    = @($sessionMap.ToArray())
                 })
         }
     }
@@ -444,6 +461,8 @@ function Get-MycoHarness {
                 # Everything else in this store is a program driving Copilot.
                 Client       = 'github/cli'
                 ListsSessions = $true
+                NewIdArg     = ''
+                Reader       = 'copilot'
             }
         }
         'claude' {
@@ -454,14 +473,20 @@ function Get-MycoHarness {
                 HomeVar      = ''
                 DirArg       = ''
                 AutoArgs     = @('--dangerously-skip-permissions')
-                NameArg      = '--name'
+                # claude accepts --name but does not keep it: a session started
+                # with one comes back titled cc-<hex>, and the name is nowhere
+                # under ~/.claude. So myco mints the id instead and owns the
+                # mapping itself.
+                NameArg      = ''
+                NewIdArg     = '--session-id'
                 ResumeArg    = '--resume'
                 ResumeJoined = $false
                 ContinueArgs = @('--continue')
                 Seeds        = $false
                 Trusts       = $false
                 Client       = ''
-                ListsSessions = $false
+                ListsSessions = $true
+                Reader       = 'claude'
             }
         }
         'opencode' {
@@ -482,6 +507,8 @@ function Get-MycoHarness {
                 Trusts       = $false
                 Client       = ''
                 ListsSessions = $false
+                NewIdArg     = ''
+                Reader       = ''
             }
         }
         'pi' {
@@ -500,6 +527,8 @@ function Get-MycoHarness {
                 Trusts       = $false
                 Client       = ''
                 ListsSessions = $false
+                NewIdArg     = ''
+                Reader       = ''
             }
         }
     }
@@ -634,6 +663,7 @@ function Register-MycoWorkspace {
             createdAt   = Get-MycoTimestamp
             lastUsedAt  = Get-MycoTimestamp
             nextSession = 1
+            sessions    = @()
         }
         $registry.nextId = [int]$registry.nextId + 1
         $registry.workspaces = @(@($registry.workspaces) + @($workspace))
@@ -667,6 +697,23 @@ function Get-MycoHighestSessionNumber {
         if ($number -gt $highest) { $highest = $number }
     }
     return $highest
+}
+
+function Register-MycoMintedSession {
+    <#  Records a session id myco generated, with the number and name it was
+        given, before the harness has created anything. The harness cannot be
+        asked for this later - claude discards the name it is handed - so the
+        registry is the only place the mapping can live. #>
+    param([string]$Path, [int]$Number, [string]$SessionId, [string]$Slug)
+    [void](Invoke-MycoWithRegistryLock {
+            $registry = Read-MycoRegistry
+            $existing = Find-MycoWorkspaceByPath -Registry $registry -Path $Path
+            if (-not $existing) { return $null }
+            $existing.sessions = @(@($existing.sessions) +
+                @([pscustomobject]@{ n = $Number; id = $SessionId; slug = $Slug }))
+            Write-MycoRegistry $registry
+            return $null
+        })
 }
 
 function Reserve-MycoSessionNumber {
@@ -875,6 +922,7 @@ function Get-MycoSessions {
                 Active    = $false
                 MycoId    = ''
                 Label     = $name
+                DisplayId = ''
             })
     }
 
@@ -893,6 +941,100 @@ function Get-MycoSessions {
     return $ordered
 }
 
+function Get-MycoClaudeHome {
+    if ($env:CLAUDE_CONFIG_DIR) { return $env:CLAUDE_CONFIG_DIR }
+    $profileDir = $env:USERPROFILE
+    if (-not $profileDir) { $profileDir = $HOME }
+    return (Join-Path $profileDir '.claude')
+}
+
+function ConvertTo-MycoClaudeProjectName {
+    <#  Claude Code names a project folder after the working directory, with
+        every character that is not a letter, digit or dash replaced by a dash.
+        Confirmed against the real CLI: C:\...\myco_probe.dot-bcdb09 became
+        C--Users-User-AppData-Local-Temp-myco-probe-dot-bcdb09. #>
+    param([string]$Path)
+    return ($Path -replace '[^A-Za-z0-9-]', '-')
+}
+
+function Read-MycoClaudeLabel {
+    <#  The best label a claude transcript offers.
+
+        A session carries a "custom-title" record, but claude defaults that to
+        cc-<8 hex> which tells the reader nothing, so in that case the first
+        prompt is used instead. Only the head of the file is read: these
+        transcripts reach tens of megabytes, and a listing must not pay for
+        that. #>
+    param([string]$Path, [int]$MaxLines = 400)
+    $title = ''
+    $prompt = ''
+    $read = 0
+    try {
+        foreach ($line in [System.IO.File]::ReadLines($Path)) {
+            if ($read -ge $MaxLines) { break }
+            $read++
+            # Cheap string tests first; parsing every line would be far slower.
+            if ($line.Length -lt 2000 -and $line.Contains('"custom-title"')) {
+                try { $title = [string]((ConvertFrom-Json $line).customTitle) } catch { }
+            } elseif (-not $prompt -and $line.Length -lt 4000 -and $line.Contains('"last-prompt"')) {
+                try { $prompt = [string]((ConvertFrom-Json $line).lastPrompt) } catch { }
+            }
+        }
+    } catch { }
+    if ($title -and $title -notmatch '^cc-[0-9a-f]{6,}$') { return $title }
+    if ($prompt) { return $prompt }
+    return ''
+}
+
+function Get-MycoClaudeSessions {
+    <#  Claude keys its sessions on the working directory, one .jsonl per
+        session named after the session id, so a project's sessions are simply
+        the files in its project folder. #>
+    param([string]$Directory, [int]$Max = 15)
+    $root = Join-Path (Get-MycoClaudeHome) ('projects\' + (ConvertTo-MycoClaudeProjectName $Directory))
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return @() }
+
+    $files = @()
+    try { $files = @(Get-ChildItem -LiteralPath $root -Filter '*.jsonl' -File -ErrorAction Stop) } catch { return @() }
+
+    $found = New-Object System.Collections.ArrayList
+    foreach ($file in $files) {
+        [void]$found.Add([pscustomobject]@{
+                Id        = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+                Name      = ''
+                UpdatedAt = $file.LastWriteTimeUtc
+                Directory = $file.FullName
+                Active    = $false
+                MycoId    = ''
+                Label     = ''
+                DisplayId = ''
+            })
+    }
+
+    $ordered = @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
+    if ($Max -gt 0 -and $ordered.Count -gt $Max) { $ordered = @($ordered[0..($Max - 1)]) }
+    # Labels are resolved only for the sessions actually being shown, because
+    # each one costs a read.
+    foreach ($session in $ordered) {
+        $session.Name = Read-MycoClaudeLabel -Path $session.Directory
+        $session.Label = $session.Name
+    }
+    return $ordered
+}
+
+function Get-MycoHarnessSessions {
+    <#  The raw sessions of a workspace, from whichever store its harness uses. #>
+    param($Harness, [string]$Directory, [int]$Max = 15)
+    switch ($Harness.Reader) {
+        'copilot' {
+            $store = Get-MycoHarnessHome -Harness $Harness -Directory $Directory
+            return @(Get-MycoSessions -CopilotHome $store -Max $Max -Client $Harness.Client)
+        }
+        'claude' { return @(Get-MycoClaudeSessions -Directory $Directory -Max $Max) }
+    }
+    return @()
+}
+
 function Add-MycoSessionIds {
     <#  Gives every listed session the id it is shown and resumed by.
 
@@ -901,21 +1043,42 @@ function Add-MycoSessionIds {
         from a plain copilot run, or from before myco named them - still falls
         back to its position in the list, skipping any number a named session
         already holds so no two rows can ever claim the same id. #>
-    param($Sessions, [string]$WorkspaceId)
+    param($Sessions, [string]$WorkspaceId, $Minted = @())
     $list = @($Sessions)
+
+    # A session myco minted an id for is matched by that id, not by its name:
+    # the harness may have renamed it, or never kept the name at all.
+    $byId = @{}
+    foreach ($entry in @($Minted)) {
+        if ($entry -and $entry.id) { $byId[[string]$entry.id] = $entry }
+    }
 
     $taken = @{}
     foreach ($session in $list) {
         $named = Get-MycoNamedSessionId -Name $session.Name
         if ($named) { $taken[$named] = $true }
+        if ($byId.ContainsKey([string]$session.Id)) {
+            $taken[(Format-MycoSessionId -WorkspaceId $WorkspaceId -Number ([int]$byId[[string]$session.Id].n))] = $true
+        }
     }
 
     $next = 1
     foreach ($session in $list) {
+        $minted = $null
+        if ($byId.ContainsKey([string]$session.Id)) { $minted = $byId[[string]$session.Id] }
+        if ($minted) {
+            $session.MycoId = Format-MycoSessionId -WorkspaceId $WorkspaceId -Number ([int]$minted.n)
+            if ($minted.slug) {
+                $session.Label = $minted.slug
+                $session.DisplayId = $minted.slug + '-' + $session.MycoId
+            }
+            continue
+        }
         $named = Get-MycoNamedSessionId -Name $session.Name
         if ($named) {
             $session.MycoId = $named
             $session.Label = Get-MycoNamedSessionLabel -Name $session.Name
+            $session.DisplayId = $session.Name
             continue
         }
         $id = Format-MycoSessionId -WorkspaceId $WorkspaceId -Number $next
@@ -927,6 +1090,7 @@ function Add-MycoSessionIds {
         $next++
         $session.MycoId = $id
         $session.Label = $session.Name
+        $session.DisplayId = $id
     }
     return $list
 }
@@ -941,16 +1105,15 @@ function Get-MycoWorkspaceSessions {
     $harness = Get-MycoHarness ([string]$Workspace.harness)
     if (-not $harness) { $harness = Get-MycoHarness (Get-MycoDefaultHarness) }
     if (-not $harness.ListsSessions) { return @() }
-    $store = Get-MycoHarnessHome -Harness $harness -Directory $Workspace.path
-    $sessions = @(Get-MycoSessions -CopilotHome $store -Max $Max -Client $harness.Client)
-    return @(Add-MycoSessionIds -Sessions $sessions -WorkspaceId $Workspace.id)
+    $sessions = @(Get-MycoHarnessSessions -Harness $harness -Directory $Workspace.path -Max $Max)
+    return @(Add-MycoSessionIds -Sessions $sessions -WorkspaceId $Workspace.id -Minted $Workspace.sessions)
 }
 
 function Format-MycoSessionDisplayId {
-    <#  What the ID column shows: the full name-and-id for a session myco
-        named, and the bare number for anything else. #>
+    <#  What the ID column shows: the full name-and-id when myco named or
+        minted the session, and the bare number for anything else. #>
     param($Session)
-    if ($Session.Name -cmatch $script:MycoNamedSessionPattern) { return $Session.Name }
+    if ($Session.DisplayId) { return $Session.DisplayId }
     return $Session.MycoId
 }
 
@@ -1300,7 +1463,17 @@ function Invoke-MycoLaunch {
     if ($slug) {
         $number = Reserve-MycoSessionNumber -Path $Directory -CopilotHome $harnessHome
         $sessionName = $slug + '-' + (Format-MycoSessionId -WorkspaceId $workspace.id -Number $number)
-        if ($Harness.NameArg) { $commandArgs += @($Harness.NameArg, $sessionName) }
+        if ($Harness.NameArg) {
+            # The harness keeps the name, so the id travels inside it.
+            $commandArgs += @($Harness.NameArg, $sessionName)
+        } elseif ($Harness.NewIdArg) {
+            # The harness discards names, so myco mints the session id and
+            # remembers the mapping. Recorded before launching, so a session
+            # that starts and crashes still holds its number.
+            $sessionId = [guid]::NewGuid().ToString()
+            Register-MycoMintedSession -Path $Directory -Number $number -SessionId $sessionId -Slug $slug
+            $commandArgs += @($Harness.NewIdArg, $sessionId)
+        }
     }
     if ($Continue) { $commandArgs += @($Harness.ContinueArgs) }
     if ($rest) { $commandArgs += @($rest) }

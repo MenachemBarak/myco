@@ -942,7 +942,9 @@ Describe 'harnesses' {
 
     It 'names a session on every harness that can name one' {
         $sb = New-Sandbox
-        foreach ($tool in @('claude', 'pi')) {
+        # pi keeps a name it is given. claude does not - it is handed a minted
+        # session id instead, which is covered by the claude tests.
+        foreach ($tool in @('pi')) {
             $proj = New-Project -Sandbox $sb -Name $tool
             $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @($tool, 'start', 'fix-login')
             $call = Get-LastHarnessCall -Sandbox $sb -Tool $tool
@@ -1009,7 +1011,7 @@ Describe 'harnesses' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('config', 'harness', 'claude')
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
-        Assert-Match $call.CliArgs '--name work-\d{6}' 'the configured default harness must be used'
+        Assert-Match $call.CliArgs '--dangerously-skip-permissions' 'the configured default harness must be used'
     }
 
     It 'reports the configured harness' {
@@ -1052,7 +1054,7 @@ Describe 'harnesses' {
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work') -Shell cmd
         $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
-        Assert-Match $call.CliArgs '--name work-\d{6}' 'the harness must be selected through cmd.exe as well'
+        Assert-Match $call.CliArgs '--session-id [0-9a-f-]{36}' 'the harness must be selected through cmd.exe as well'
         Assert-Equal $proj $call.Cwd 'and run in the project directory'
     }
 
