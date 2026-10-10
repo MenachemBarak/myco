@@ -440,6 +440,10 @@ function Get-MycoHarness {
                 ContinueArgs = @('--continue')
                 Seeds        = $true
                 Trusts       = $true
+                # The only client that is a terminal session a person opened.
+                # Everything else in this store is a program driving Copilot.
+                Client       = 'github/cli'
+                ListsSessions = $true
             }
         }
         'claude' {
@@ -456,6 +460,8 @@ function Get-MycoHarness {
                 ContinueArgs = @('--continue')
                 Seeds        = $false
                 Trusts       = $false
+                Client       = ''
+                ListsSessions = $false
             }
         }
         'opencode' {
@@ -474,6 +480,8 @@ function Get-MycoHarness {
                 ContinueArgs = @('--continue')
                 Seeds        = $false
                 Trusts       = $false
+                Client       = ''
+                ListsSessions = $false
             }
         }
         'pi' {
@@ -490,6 +498,8 @@ function Get-MycoHarness {
                 ContinueArgs = @('--continue')
                 Seeds        = $false
                 Trusts       = $false
+                Client       = ''
+                ListsSessions = $false
             }
         }
     }
@@ -694,30 +704,74 @@ function Update-MycoWorkspaceUsage {
 # ----------------------------------------------------------------- sessions
 
 function Read-MycoSessionMeta {
-    <#  Parses the flat key: value metadata Copilot writes for each session. #>
+    <#  Parses the key: value metadata Copilot writes for each session.
+
+        A value may be a block scalar - "|", ">", with an optional chomping or
+        indentation indicator - in which case the text is the indented lines
+        that follow. Those lines are consumed here rather than scanned, because
+        a session name can quote a conversation, and a quoted line shaped like
+        "id: ..." is text, not metadata. #>
     param([string]$Path)
     $meta = @{}
     $lines = $null
     try { $lines = [System.IO.File]::ReadAllLines($Path) } catch { return $meta }
-    foreach ($line in $lines) {
-        if ($line -match '^\s*([A-Za-z0-9_]+)\s*:\s*(.*)$') {
-            $key = $Matches[1]
-            $value = $Matches[2].Trim()
-            if ($value.Length -ge 2) {
-                $first = $value.Substring(0, 1)
-                $last = $value.Substring($value.Length - 1, 1)
-                if ($first -eq '"' -and $last -eq '"') {
-                    $value = $value.Substring(1, $value.Length - 2)
-                    $value = $value -replace '\\"', '"' -replace '\\\\', '\'
-                } elseif ($first -eq "'" -and $last -eq "'") {
-                    # YAML single-quoted style escapes an apostrophe by
-                    # doubling it, which is how Copilot writes session names.
-                    $value = $value.Substring(1, $value.Length - 2)
-                    $value = $value -replace "''", "'"
+
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -notmatch '^(\s*)([A-Za-z0-9_]+)\s*:\s*(.*)$') { continue }
+        $keyIndent = $Matches[1].Length
+        $key = $Matches[2]
+        $value = $Matches[3].Trim()
+
+        if ($value -match '^([|>])([+-]?)([0-9]*)([+-]?)\s*$') {
+            $folded = ($Matches[1] -eq '>')
+            $chomp = $Matches[2] + $Matches[4]
+            $block = New-Object System.Collections.ArrayList
+            $blockIndent = -1
+            $j = $i + 1
+            while ($j -lt $lines.Count) {
+                $next = $lines[$j]
+                # A blank line belongs to the block; it does not end it.
+                if ($next.Trim().Length -eq 0) { [void]$block.Add(''); $j++; continue }
+                $indent = $next.Length - $next.TrimStart().Length
+                if ($indent -le $keyIndent) { break }
+                if ($blockIndent -lt 0) { $blockIndent = $indent }
+                $take = $next
+                if ($take.Length -ge $blockIndent) { $take = $take.Substring($blockIndent) }
+                else { $take = $take.TrimStart() }
+                [void]$block.Add($take)
+                $j++
+            }
+            $i = $j - 1
+
+            $text = @($block.ToArray())
+            # "-" strips the trailing newline, nothing keeps one trailing blank
+            # line, and "+" keeps them all. myco only ever shows one line, but
+            # the distinction is cheap and keeps the value honest.
+            if ($chomp -ne '+') {
+                while ($text.Count -gt 0 -and $text[$text.Count - 1] -eq '') {
+                    $text = @($text[0..($text.Count - 2)])
                 }
             }
-            $meta[$key] = $value
+            $separator = if ($folded) { ' ' } else { "`n" }
+            $meta[$key] = ($text -join $separator)
+            continue
         }
+
+        if ($value.Length -ge 2) {
+            $first = $value.Substring(0, 1)
+            $last = $value.Substring($value.Length - 1, 1)
+            if ($first -eq '"' -and $last -eq '"') {
+                $value = $value.Substring(1, $value.Length - 2)
+                $value = $value -replace '\\"', '"' -replace '\\\\', '\'
+            } elseif ($first -eq "'" -and $last -eq "'") {
+                # YAML single-quoted style escapes an apostrophe by
+                # doubling it, which is how Copilot writes session names.
+                $value = $value.Substring(1, $value.Length - 2)
+                $value = $value -replace "''", "'"
+            }
+        }
+        $meta[$key] = $value
     }
     return $meta
 }
@@ -776,8 +830,9 @@ function Test-MycoSessionActive {
 }
 
 function Get-MycoSessions {
-    <#  Returns the workspace's sessions, most recently updated first. #>
-    param([string]$CopilotHome, [int]$Max = 15)
+    <#  Returns the workspace's sessions, most recently updated first. Only
+        sessions from the given client are returned; '' returns them all. #>
+    param([string]$CopilotHome, [int]$Max = 15, [string]$Client = '')
     $root = Join-Path $CopilotHome 'session-state'
     if (-not (Test-Path -LiteralPath $root -PathType Container)) { return @() }
 
@@ -791,16 +846,27 @@ function Get-MycoSessions {
         if ($dir.Name.StartsWith('.')) { continue }
         $sessionId = $dir.Name
         $name = ''
+        # Not $client: PowerShell variable names are case-insensitive, so that
+        # would be the $Client parameter and the filter would disable itself.
+        $sessionClient = ''
         $updatedAt = $dir.LastWriteTimeUtc
         $metaPath = Join-Path $dir.FullName 'workspace.yaml'
         if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
             $meta = Read-MycoSessionMeta -Path $metaPath
             if ($meta.ContainsKey('id') -and $meta['id']) { $sessionId = $meta['id'] }
             if ($meta.ContainsKey('name') -and $meta['name']) { $name = $meta['name'] }
+            if ($meta.ContainsKey('client_name')) { $sessionClient = [string]$meta['client_name'] }
             if ($meta.ContainsKey('updated_at')) {
                 $updatedAt = ConvertTo-MycoDate -Text $meta['updated_at'] -Fallback $dir.LastWriteTimeUtc
             }
         }
+        # Programs drive Copilot through the same store - acp clients, agent
+        # runners, the sdk. Those sessions were never a terminal tab, so they
+        # are not myco's to list, number or reopen. An allowlist is used rather
+        # than a denylist of the programs seen so far: a new one appearing and
+        # being ignored is safe, whereas a new one appearing and being reopened
+        # fills the screen with work nobody started.
+        if ($Client -and $sessionClient -ne $Client) { continue }
         [void]$found.Add([pscustomobject]@{
                 Id        = $sessionId
                 Name      = $name
@@ -867,9 +933,16 @@ function Add-MycoSessionIds {
 
 function Get-MycoWorkspaceSessions {
     <#  The sessions of one workspace, already carrying their ids. Listing and
-        resuming must agree on the numbering, so both come through here. #>
+        resuming must agree on the numbering, so both come through here.
+
+        A harness myco cannot yet read returns nothing, and the caller is
+        expected to say so rather than report an empty folder. #>
     param($Workspace, [int]$Max = 15)
-    $sessions = @(Get-MycoSessions -CopilotHome (Join-Path $Workspace.path '.copilot') -Max $Max)
+    $harness = Get-MycoHarness ([string]$Workspace.harness)
+    if (-not $harness) { $harness = Get-MycoHarness (Get-MycoDefaultHarness) }
+    if (-not $harness.ListsSessions) { return @() }
+    $store = Get-MycoHarnessHome -Harness $harness -Directory $Workspace.path
+    $sessions = @(Get-MycoSessions -CopilotHome $store -Max $Max -Client $harness.Client)
     return @(Add-MycoSessionIds -Sessions $sessions -WorkspaceId $Workspace.id)
 }
 
@@ -1272,16 +1345,21 @@ function Show-MycoWorkspaceTable {
         if ($shown.Length -gt $idWidth) { $idWidth = $shown.Length }
     }
     if ($idWidth -gt 32) { $idWidth = 32 }
+    $harnessName = [string]$Workspace.harness
+    if (-not $harnessName) { $harnessName = Get-MycoDefaultHarness }
+    $harnessWidth = 7
+    if ($harnessName.Length -gt $harnessWidth) { $harnessWidth = $harnessName.Length }
     $statusWidth = 8
     $whenWidth = 12
-    # Four columns plus their padding and five vertical rules.
-    $overhead = ($idWidth + $statusWidth + $whenWidth) + (4 * 2) + 5
+    # Five columns plus their padding and six vertical rules.
+    $overhead = ($idWidth + $harnessWidth + $statusWidth + $whenWidth) + (5 * 2) + 6
     $nameWidth = $Width - $overhead
     if ($nameWidth -lt 12) { $nameWidth = 12 }
-    $widths = @($idWidth, $statusWidth, $whenWidth, $nameWidth)
+    $widths = @($idWidth, $harnessWidth, $statusWidth, $whenWidth, $nameWidth)
     $innerWidth = $overhead + $nameWidth - 2
 
-    $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) + ' (' + $Workspace.origin + ')'
+    $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) +
+    ' (' + $harnessName + ', ' + $Workspace.origin + ')'
     $titleText = ([string]$Glyphs.Horizontal) + ' ' + $title + ' '
     if ($titleText.Length -gt $innerWidth) {
         $titleText = $titleText.Substring(0, $innerWidth)
@@ -1296,6 +1374,7 @@ function Show-MycoWorkspaceTable {
         -Left ([string]$Glyphs.TeeLeft) -Middle ([string]$Glyphs.TeeDown) -Right ([string]$Glyphs.TeeRight)
 
     $heading = [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'ID' $idWidth) +
+    ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'HARNESS' $harnessWidth) +
     ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'STATUS' $statusWidth) +
     ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'WHEN' $whenWidth) +
     ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell 'SESSION' $nameWidth) +
@@ -1315,6 +1394,7 @@ function Show-MycoWorkspaceTable {
         if (-not $name) { $name = '(unnamed)' }
 
         $row = [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $sessionId $idWidth $Glyphs.Ellipsis) +
+        ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $harnessName $harnessWidth $Glyphs.Ellipsis) +
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $status $statusWidth) +
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell (Format-MycoRelativeTime $session.UpdatedAt) $whenWidth) +
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $name $nameWidth $Glyphs.Ellipsis) +
@@ -1333,7 +1413,10 @@ function Show-MycoWorkspaceNote {
     <#  A framed one-line message for a workspace with nothing to tabulate. #>
     param($Workspace, [string]$Note, $Glyphs, [int]$Width, [string]$Colour)
     $innerWidth = $Width - 2
-    $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) + ' (' + $Workspace.origin + ')'
+    $harnessName = [string]$Workspace.harness
+    if (-not $harnessName) { $harnessName = Get-MycoDefaultHarness }
+    $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) +
+    ' (' + $harnessName + ', ' + $Workspace.origin + ')'
     $titleText = ([string]$Glyphs.Horizontal) + ' ' + $title + ' '
     if ($titleText.Length -gt $innerWidth) { $titleText = $titleText.Substring(0, $innerWidth) }
     $fill = [string]$Glyphs.Horizontal * ($innerWidth - $titleText.Length)
@@ -1369,9 +1452,17 @@ function Show-MycoSessions {
         if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) {
             $note = 'folder is missing - run "myco prune" to clean up'
         } else {
-            $sessions = @(Get-MycoWorkspaceSessions -Workspace $workspace -Max $config.maxSessions)
-            if ($sessions.Count -eq 0) { $note = 'no sessions yet' }
-            $activeTotal += @($sessions | Where-Object { $_.Active }).Count
+            $harness = Get-MycoHarness ([string]$workspace.harness)
+            if ($harness -and -not $harness.ListsSessions) {
+                # Saying "no sessions yet" here would be untrue: the work is
+                # there, myco just cannot read that harness's store yet.
+                $note = $harness.Name + ' sessions are not listed yet - run "myco ' +
+                $harness.Name + ' continue" in the folder'
+            } else {
+                $sessions = @(Get-MycoWorkspaceSessions -Workspace $workspace -Max $config.maxSessions)
+                if ($sessions.Count -eq 0) { $note = 'no sessions yet' }
+                $activeTotal += @($sessions | Where-Object { $_.Active }).Count
+            }
         }
         [void]$rendered.Add([pscustomobject]@{ Workspace = $workspace; Sessions = $sessions; Note = $note })
     }
@@ -1598,9 +1689,18 @@ function Get-MycoRecoverCandidates {
     $cutoff = [DateTime]::UtcNow.AddHours(-$Hours)
     $found = New-Object System.Collections.ArrayList
     $running = 0
+    $unreadable = New-Object System.Collections.ArrayList
 
     foreach ($workspace in @($Registry.workspaces)) {
         if (-not (Test-Path -LiteralPath $workspace.path -PathType Container)) { continue }
+        # A folder whose harness myco cannot read yet is skipped outright. It
+        # may still hold copilot state from before it moved, and reopening that
+        # would restore work from the wrong tool.
+        $harness = Get-MycoHarness ([string]$workspace.harness)
+        if ($harness -and -not $harness.ListsSessions) {
+            if (-not $unreadable.Contains($harness.Name)) { [void]$unreadable.Add($harness.Name) }
+            continue
+        }
         $sessions = @(Get-MycoWorkspaceSessions -Workspace $workspace -Max $PerWorkspace)
         foreach ($session in $sessions) {
             if ($session.UpdatedAt.ToUniversalTime() -lt $cutoff) { continue }
@@ -1617,8 +1717,9 @@ function Get-MycoRecoverCandidates {
     }
 
     return [pscustomobject]@{
-        Sessions = @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
-        Running  = $running
+        Sessions   = @($found.ToArray() | Sort-Object -Property UpdatedAt -Descending)
+        Running    = $running
+        Unreadable = @($unreadable.ToArray())
     }
 }
 
@@ -1706,6 +1807,7 @@ function Invoke-MycoRecover {
         -PerWorkspace $config.maxSessions
     $candidates = @($scan.Sessions)
     $running = [int]$scan.Running
+    $unreadable = @($scan.Unreadable)
 
     $glyphs = Get-MycoGlyphSet
     $window = Format-MycoHours $options.Hours
@@ -1715,11 +1817,17 @@ function Invoke-MycoRecover {
         if ($running -eq 1) { $word = 'session is' }
         $runningNote = '  ' + $running + ' ' + $word + ' still running and already open, so left alone.'
     }
+    $skippedNote = ''
+    if ($unreadable.Count -gt 0) {
+        $skippedNote = '  ' + ($unreadable -join ' and ') +
+        ' folders were skipped: myco cannot list those sessions yet.'
+    }
 
     if ($candidates.Count -eq 0) {
         Write-MycoLine ''
         Write-MycoLine ('  Nothing to recover from the last ' + $window + '.') 'Cyan'
         if ($runningNote) { Write-MycoLine $runningNote 'DarkGray' }
+        if ($skippedNote) { Write-MycoLine $skippedNote 'DarkGray' }
         Write-MycoLine ''
         return (New-MycoResult 0)
     }
@@ -1729,6 +1837,7 @@ function Invoke-MycoRecover {
     if ($options.DryRun) { $verb = 'Would recover' }
     Write-MycoLine ('  ' + $verb + ' ' + $candidates.Count + ' session(s) from the last ' + $window) 'Cyan'
     if ($runningNote) { Write-MycoLine $runningNote 'DarkGray' }
+    if ($skippedNote) { Write-MycoLine $skippedNote 'DarkGray' }
     Write-MycoLine ''
     foreach ($candidate in $candidates) {
         $name = $candidate.Name
@@ -1819,7 +1928,8 @@ function Show-MycoStatus {
     }
 
     if (Test-Path -LiteralPath $copilotHome -PathType Container) {
-        $sessions = @(Get-MycoSessions -CopilotHome $copilotHome -Max $config.maxSessions)
+        $harness = Resolve-MycoHarness $null -Directory $Directory
+        $sessions = @(Get-MycoSessions -CopilotHome $copilotHome -Max $config.maxSessions -Client $harness.Client)
         $active = @($sessions | Where-Object { $_.Active }).Count
         Write-MycoLine ('  sessions     ' + $sessions.Count + ' listed, ' + $active + ' active')
     }
