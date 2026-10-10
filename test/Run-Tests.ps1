@@ -232,7 +232,9 @@ function New-FakeSession {
         [switch]$Active,
         [string]$SessionId,
         [int]$LockPid = 4242,
-        [Nullable[datetime]]$LockWrittenAt = $null
+        [Nullable[datetime]]$LockWrittenAt = $null,
+        [ValidateSet('quoted', 'block', 'folded')][string]$NameStyle = 'quoted',
+        [string]$Client = 'github/cli'
     )
     if (-not $SessionId) { $SessionId = [guid]::NewGuid().ToString() }
     $dir = Join-Path $CopilotHome ('session-state\' + $SessionId)
@@ -241,18 +243,30 @@ function New-FakeSession {
     # Copilot writes the name in YAML single-quoted style, where an apostrophe
     # is escaped by doubling it. The fixture matches that, because a fixture
     # that is tidier than reality hides real parsing bugs.
-    $quotedName = "'" + ($Name -replace "'", "''") + "'"
-    $yaml = @(
-        "id: $SessionId",
-        "cwd: $SessionCwd",
-        'client_name: github/cli',
-        "name: $quotedName",
-        'user_named: false',
-        'summary_count: 0',
-        'fork_count: 0',
-        "created_at: $stamp",
-        "updated_at: $stamp"
-    ) -join "`n"
+    $nameLines = @()
+    if ($NameStyle -eq 'quoted') {
+        $nameLines = @('name: ' + "'" + ($Name -replace "'", "''") + "'")
+    } else {
+        # A multi-line name is written as a block scalar: an indicator on the
+        # key's line and the text indented underneath. Copied from a real
+        # session written by the acp client, blank line and all - the inner
+        # "key: value" line is in the fixture on purpose, because such a line
+        # is text, not metadata, and must not be read as metadata.
+        $indicator = if ($NameStyle -eq 'folded') { '>-' } else { '|-' }
+        $nameLines = @(('name: ' + $indicator)) +
+        (@($Name -split "`n") | ForEach-Object { '  ' + $_ })
+    }
+    $yaml = (@(
+            "id: $SessionId",
+            "cwd: $SessionCwd",
+            "client_name: $Client"
+        ) + $nameLines + @(
+            'user_named: false',
+            'summary_count: 0',
+            'fork_count: 0',
+            "created_at: $stamp",
+            "updated_at: $stamp"
+        )) -join "`n"
     Set-Content -LiteralPath (Join-Path $dir 'workspace.yaml') -Value $yaml -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $dir 'events.jsonl') -Value '{}' -Encoding UTF8
     if ($Active) {
@@ -1157,6 +1171,193 @@ Describe 'myco sessions' {
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
         Assert-NoMatch $r.Output '\[000\]' 'the global copilot home must never be listed'
+    }
+}
+
+Describe 'multi-line session names' {
+
+    It 'shows the text of a block-scalar name, not the yaml indicator' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -NameStyle block -UpdatedAt (Get-Date) `
+            -Name "Dashboards agent context`nsecond line of the same name"
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'Dashboards agent context' 'the first line of the name must be shown'
+        Assert-NoMatch $r.Output '\|-' 'the block indicator must never be shown as the name'
+    }
+
+    It 'reads a folded block name too' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -NameStyle folded -UpdatedAt (Get-Date) `
+            -Name "Folded agent context`nwrapped onto another line"
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'Folded agent context' 'a folded name must be read as text'
+        Assert-NoMatch $r.Output '>-' 'the fold indicator must never be shown as the name'
+    }
+
+    It 'never lets text inside a name be read as session metadata' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        # A name that quotes a conversation can contain anything, including a
+        # line shaped exactly like the metadata myco reads.
+        $target = New-FakeSession -CopilotHome $ch -NameStyle block -UpdatedAt (Get-Date) `
+            -Name "Agent context`nid: 11111111-2222-3333-4444-555555555555`nupdated_at: 1999-01-01T00:00:00.000Z"
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001001')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs ([regex]::Escape($target)) 'the session''s real id must be resumed'
+        Assert-NoMatch $call.CliArgs '11111111-2222-3333-4444-555555555555' `
+            'an id written inside a name must never be mistaken for the session id'
+    }
+
+    It 'keeps a blank line inside a name from ending it' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -NameStyle block -UpdatedAt (Get-Date) `
+            -Name "Context header`n`nuser_named: true`nsummary_count: 99"
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'Context header' 'the name must still be read'
+        Assert-NoMatch $r.Output 'summary_count' 'nothing after a blank line inside the name is metadata'
+    }
+
+    It 'still reads the metadata that follows a multi-line name' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        # updated_at is written after the name, so a parser that swallows the
+        # rest of the file would silently date every such session wrongly.
+        $null = New-FakeSession -CopilotHome $ch -NameStyle block -UpdatedAt (Get-Date).AddDays(-400) `
+            -Name "Old agent context`nwith a second line"
+        $null = New-FakeSession -CopilotHome $ch -Name 'Plain recent session' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '001001[^\r\n]*Plain recent session' 'the recent session must sort first'
+        Assert-Match $r.Output '001002[^\r\n]*Old agent context' 'the dated one must sort second, so its date was read'
+    }
+
+    It 'collapses a multi-line name onto one row' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -NameStyle block -UpdatedAt (Get-Date) `
+            -Name "First line here`nSecond line here`nThird line here"
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        $rows = @(Get-TableRow -Text $r.Output | Where-Object { $_ -match 'First line here' })
+        Assert-Equal 1 $rows.Count 'a multi-line name must occupy exactly one row'
+        Assert-NoMatch $r.Output '(?m)^Second line here' 'no part of the name may escape the table'
+    }
+}
+
+Describe 'only the sessions you started' {
+
+    It 'does not list a session an embedded agent created' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        # An app driving Copilot through ACP writes into the same store, but it
+        # was never a terminal tab, so it is not myco's to manage.
+        $null = New-FakeSession -CopilotHome $ch -Client 'github/acp' -Name 'Hidden agent run' -UpdatedAt (Get-Date)
+        $null = New-FakeSession -CopilotHome $ch -Name 'My own work' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output 'Hidden agent run' 'an embedded session must not be listed'
+        Assert-Match $r.Output 'My own work' 'your own session must still be listed'
+    }
+
+    It 'ignores every non-interactive client, not just one' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        foreach ($client in @('github/acp', 'github/autopilot', 'sdk', 'observer-q02', 'hermes-agent')) {
+            $null = New-FakeSession -CopilotHome $ch -Client $client -Name ('Robot ' + $client) -UpdatedAt (Get-Date)
+        }
+        $null = New-FakeSession -CopilotHome $ch -Name 'My own work' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output 'Robot ' 'no embedded client may be listed'
+        Assert-Match $r.Output '001001[^\r\n]*My own work' 'your session takes the first id'
+    }
+
+    It 'does not let an embedded session take an id' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Client 'github/acp' -Name 'Hidden one' -UpdatedAt (Get-Date)
+        $mine = New-FakeSession -CopilotHome $ch -Name 'Mine' -UpdatedAt (Get-Date).AddMinutes(-5)
+        Clear-CopilotCalls -Sandbox $sb
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', '001001')
+        $call = Get-LastCopilotCall -Sandbox $sb
+        Assert-Match $call.CliArgs ([regex]::Escape($mine)) 'id 001001 must be your session, not the hidden one'
+    }
+
+    It 'never reopens an embedded session' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $hidden = New-FakeSession -CopilotHome $ch -Client 'github/acp' -Name 'Hidden agent run' `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
+        Assert-NoMatch $r.Output ([regex]::Escape($hidden)) 'an embedded session must never be recovered'
+        Assert-NoMatch $r.Output 'Hidden agent run' 'nor listed as recoverable'
+    }
+
+    It 'counts only your own sessions' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Client 'github/acp' -Name 'Hidden' -UpdatedAt (Get-Date) -Active
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('status')
+        Assert-Match $r.Output 'sessions     0 listed' 'a folder holding only embedded sessions has none of yours'
+    }
+}
+
+Describe 'harnesses myco cannot list yet' {
+
+    It 'says so, instead of claiming the folder has no sessions' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)claude' 'the listing must name the harness it cannot read'
+        Assert-NoMatch $r.Output 'no sessions yet' 'claiming there are none would be untrue'
+    }
+
+    It 'recover skips such a workspace and says how many' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        $ch = Join-Path $proj '.copilot'
+        # Copilot state left over from before the folder moved to claude. It
+        # must not be reopened: that work is not where this folder's work is.
+        $null = New-FakeSession -CopilotHome $ch -Name 'Old copilot work' -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
+        Assert-NoMatch $r.Output 'Old copilot work' 'a claude folder must not have copilot sessions reopened'
+        Assert-Match $r.Output '(?i)claude' 'recover must say which harness it skipped'
+    }
+
+    It 'still recovers the copilot folders alongside it' {
+        $sb = New-Sandbox
+        $a = New-Project -Sandbox $sb -Name 'alpha'
+        $b = New-Project -Sandbox $sb -Name 'beta'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('claude', 'start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $b -MycoArgs @('start', 'work')
+        $null = New-FakeSession -CopilotHome (Join-Path $b '.copilot') -Name 'Real copilot work' `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('recover', '--dry-run')
+        Assert-Match $r.Output 'Real copilot work' 'the copilot workspace must still be recovered'
     }
 }
 
