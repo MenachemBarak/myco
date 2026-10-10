@@ -26,7 +26,7 @@ function Get-MycoLauncherPath {
     return (Join-Path (Split-Path -Parent $script:MycoLibRoot) 'bin\myco.ps1')
 }
 
-function Get-MycoVersion { '2.4.0' }
+function Get-MycoVersion { '2.4.1' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
@@ -776,8 +776,10 @@ function Read-MycoSessionMeta {
         "id: ..." is text, not metadata. #>
     param([string]$Path)
     $meta = @{}
-    $lines = $null
-    try { $lines = [System.IO.File]::ReadAllLines($Path) } catch { return $meta }
+    # Shared: this file belongs to the harness, which may be writing it.
+    $text = Read-MycoSharedText -Path $Path
+    if ($null -eq $text) { return $meta }
+    $lines = @($text -split "`r?`n")
 
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
@@ -973,6 +975,37 @@ function ConvertTo-MycoClaudeProjectName {
     return ($Path -replace '[^A-Za-z0-9-]', '-')
 }
 
+function Open-MycoSharedRead {
+    <#  Opens a file for reading without standing in the owner's way.
+
+        myco reads state that belongs to the harness, which may be writing,
+        compacting, renaming or deleting that very file. FileShare.ReadWrite
+        plus Delete says so; the default share mode would make the harness fail
+        with a sharing violation on its own session. #>
+    param([string]$Path)
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    return (New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, $share))
+}
+
+function Read-MycoSharedText {
+    <#  Whole-file read that never blocks the file's owner. Returns $null when
+        the file cannot be read. #>
+    param([string]$Path)
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = Open-MycoSharedRead -Path $Path
+        $reader = New-Object System.IO.StreamReader($stream)
+        return $reader.ReadToEnd()
+    } catch {
+        return $null
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        elseif ($stream) { $stream.Dispose() }
+    }
+}
+
 function Read-MycoClaudeLabel {
     <#  The best label a claude transcript offers.
 
@@ -980,15 +1013,22 @@ function Read-MycoClaudeLabel {
         cc-<8 hex> which tells the reader nothing, so in that case the first
         prompt is used instead. Only the head of the file is read: these
         transcripts reach tens of megabytes, and a listing must not pay for
-        that. #>
+        that.
+
+        The reader is disposed explicitly rather than left to a lazy
+        enumerator, which would keep the handle open after the line cap is hit
+        and block the harness from compacting its own session. #>
     param([string]$Path, [int]$MaxLines = 400)
     $title = ''
     $prompt = ''
-    $read = 0
+    $stream = $null
+    $reader = $null
     try {
-        foreach ($line in [System.IO.File]::ReadLines($Path)) {
-            if ($read -ge $MaxLines) { break }
-            $read++
+        $stream = Open-MycoSharedRead -Path $Path
+        $reader = New-Object System.IO.StreamReader($stream)
+        for ($read = 0; $read -lt $MaxLines; $read++) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
             # Cheap string tests first; parsing every line would be far slower.
             if ($line.Length -lt 2000 -and $line.Contains('"custom-title"')) {
                 try { $title = [string]((ConvertFrom-Json $line).customTitle) } catch { }
@@ -996,7 +1036,11 @@ function Read-MycoClaudeLabel {
                 try { $prompt = [string]((ConvertFrom-Json $line).lastPrompt) } catch { }
             }
         }
-    } catch { }
+    } catch {
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        elseif ($stream) { $stream.Dispose() }
+    }
     if ($title -and $title -notmatch '^cc-[0-9a-f]{6,}$') { return $title }
     if ($prompt) { return $prompt }
     return ''
@@ -1228,7 +1272,9 @@ function Add-MycoTrustedFolder {
     try {
         $text = ''
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $text = [System.IO.File]::ReadAllText($path)
+            # Shared: Copilot owns this file and may have it open.
+            $text = Read-MycoSharedText -Path $path
+            if ($null -eq $text) { return }
         }
 
         $entry = '"' + (ConvertTo-MycoJsonString $Directory) + '"'

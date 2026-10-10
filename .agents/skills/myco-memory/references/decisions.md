@@ -653,6 +653,32 @@ that. Labels are resolved only for the sessions actually shown.
 never shows as active. Reporting nothing is honest; guessing would break the
 rule that active means a process genuinely exists.
 
+### 10.1f Reading harness state must never block the harness
+
+Every file myco reads that belongs to a harness is opened through
+`Open-MycoSharedRead`: `FileShare.ReadWrite -bor FileShare.Delete`, and
+disposed in a `finally`.
+
+**What went wrong.** The claude reader walked a transcript with
+`[System.IO.File]::ReadLines` and broke out at the line cap. Breaking out of a
+lazy enumerator leaves the handle open until a collection runs — and `myco` is
+a dot-sourced function in the user's own shell, so the handle outlived the
+command by minutes. A live session then failed to compact:
+
+```
+EBUSY: resource busy or locked, open '...\1e544072-....jsonl'
+```
+
+**The quieter half was worse.** `ReadLines` opens with `FileShare.Read`, which
+conflicts with a writer already holding the file, so myco could not read the
+transcript of a *running* session at all — precisely the sessions a listing
+most needs.
+
+**The rule.** myco is a reader of other tools' state. It may never hold a file
+in a way that stops the owner writing, renaming or deleting it, and it may
+never keep a handle beyond the read. Never use a lazy enumerator over a file
+that someone else owns.
+
 ### 10.1d A harness myco cannot read says so
 
 `ListsSessions` is false for claude, opencode and pi, because their stores are

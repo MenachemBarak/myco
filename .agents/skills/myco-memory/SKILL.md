@@ -125,6 +125,10 @@ breaking them.
 - **A harness myco cannot read yet says so**, and `recover` skips it. Never
   fall back to reading `.copilot` for a folder that belongs to another tool.
   copilot and claude are readable; opencode and pi are not yet.
+- **myco never blocks the tool it is reading.** Harness files are opened
+  shared for read, write and delete, and every handle is disposed at once.
+  `myco` is a dot-sourced function in the user's own long-lived shell, so a
+  leaked handle outlives the command and breaks the harness.
 - **Never trust `claude --name`.** It is accepted and discarded. claude's ids
   are minted by myco with `--session-id` and recorded in the registry.
 - **`forget` and `prune` touch the registry only.** They must never delete a
