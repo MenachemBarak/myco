@@ -545,6 +545,59 @@ so 115 tests passed over it. It surfaced the moment one `myco start` against
 the real CLI appeared to create two sessions — the third bug in this file found
 only by running the real tool.
 
+### 10.1b A name may be a YAML block scalar
+
+```yaml
+name: |-
+  [AI Dashboards context]
+  You are the dashboards agent...
+```
+
+The value on the key's line is only an indicator; the text is the indented
+block beneath it. myco reads that block, honours the chomping indicator, and
+treats a blank line as part of it rather than its end.
+
+**Two symptoms, one cause.** Such sessions listed with the literal name `|-`.
+Worse, the indented text was then scanned for metadata, so a session whose name
+quoted a conversation containing a line like `id: ...` could take that as its
+session id, and `resume` would open the wrong conversation — or nothing.
+
+**Consuming the block is the fix, not skipping it.** A parser that merely
+ignored unparseable values would still scan the text beneath.
+
+### 10.1c Only sessions a person started are myco's
+
+A harness store is shared with programs that drive the same tool. In the
+owner's Copilot home: 457 `github/cli` sessions — theirs — alongside 85
+`github/acp`, 177 `observer-q02`, 16 `github/autopilot`, and more from `sdk`,
+`q02-*` and `hermes-agent`. 313 of 770 were not sessions anybody opened.
+
+myco lists, numbers and recovers only sessions whose `client_name` is the
+harness's interactive client, held as `Client` on the provider.
+
+**The symptom was severe.** `myco recover --hours=14` opened 16 Windows
+Terminal tabs, every one an embedded agent, and none the user's.
+
+**An allowlist, not a denylist.** New embedded clients appear constantly — four
+of those names are the owner's own experiments. A new one being ignored is a
+quiet, safe failure; a new one being reopened fills the screen with work nobody
+started. If Copilot ever renames its CLI client, myco shows nothing, which is
+visible and reparable; the opposite error is neither.
+
+**Ids had to follow.** Were embedded sessions still numbered, the ids on screen
+would not be the ids `resume` and `recover` act on.
+
+### 10.1d A harness myco cannot read says so
+
+`ListsSessions` is false for claude, opencode and pi, because their stores are
+not read yet. Such a workspace reports that its sessions are not listed yet,
+and `recover` skips it and names which harnesses it skipped.
+
+**Why not just read `.copilot` anyway.** A folder moved from copilot to claude
+still has its old `.copilot`. Reopening that is restoring work from the wrong
+tool, silently. Saying nothing would be a lie — the work exists, myco just
+cannot see it.
+
 ### 10.2 myco trusts each workspace folder in its own `.copilot`
 
 Copilot asks *Confirm folder trust* the first time a session runs in a folder,

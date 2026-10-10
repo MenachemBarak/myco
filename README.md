@@ -21,23 +21,20 @@ the work already lives in whichever tool you began it in.
 ```text
   myco · 2 workspaces · 1 active
 
-┌─ [001] checkout-service (created) ───────────────────────────────────────────┐
+┌─ [001] checkout-service (copilot, created) ──────────────────────────────────┐
 │ D:\work\checkout-service                                                     │
-├──────────────────────┬──────────┬──────────────┬─────────────────────────────┤
-│ ID                   │ STATUS   │ WHEN         │ SESSION                     │
-├──────────────────────┼──────────┼──────────────┼─────────────────────────────┤
-│ redirect-loop-001003 │ ● active │ 3 min ago    │ redirect-loop               │
-│ split-billing-001002 │          │ 5 hours ago  │ split-billing               │
-│ contract-tests-001001│          │ 2 days ago   │ contract-tests              │
-└──────────────────────┴──────────┴──────────────┴─────────────────────────────┘
+├──────────────────────┬─────────┬──────────┬──────────────┬───────────────────┤
+│ ID                   │ HARNESS │ STATUS   │ WHEN         │ SESSION           │
+├──────────────────────┼─────────┼──────────┼──────────────┼───────────────────┤
+│ redirect-loop-001003 │ copilot │ ● active │ 3 min ago    │ redirect-loop     │
+│ split-billing-001002 │ copilot │          │ 5 hours ago  │ split-billing     │
+│ contract-tests-001001│ copilot │          │ 2 days ago   │ contract-tests    │
+└──────────────────────┴─────────┴──────────┴──────────────┴───────────────────┘
 
-┌─ [002] design-system (adopted) ──────────────────────────────────────────────┐
+┌─ [002] design-system (claude, adopted) ──────────────────────────────────────┐
 │ D:\work\design-system                                                        │
-├──────────────────────┬──────────┬──────────────┬─────────────────────────────┤
-│ ID                   │ STATUS   │ WHEN         │ SESSION                     │
-├──────────────────────┼──────────┼──────────────┼─────────────────────────────┤
-│ token-naming-002001  │          │ 2026-09-15   │ token-naming                │
-└──────────────────────┴──────────┴──────────────┴─────────────────────────────┘
+│ claude sessions are not listed yet - run "myco claude continue" in the folder│
+└──────────────────────────────────────────────────────────────────────────────┘
 
   ● active = a Copilot process is running.  Resume with: myco resume <id>
 ```
@@ -58,8 +55,20 @@ on a legacy code page: `cmd.exe` on code page 437 keeps the borders but shows
 `*` instead of `●`, because that code page has box drawing and no filled
 circle. Piping the output is safe.
 
-## What "active" means
+## What myco lists
 
+Only the sessions **you** started. A harness store is shared with programs that
+drive the same tool — ACP clients, agent runners, SDK scripts — and those
+sessions were never a terminal tab. In the author's own Copilot home, 313 of
+770 sessions belonged to such programs. myco lists, numbers and recovers only
+sessions from the harness's interactive client, so `myco recover` brings back
+your work rather than somebody's background agents.
+
+A workspace whose harness myco cannot read yet says so, rather than claiming it
+has no sessions, and `recover` skips it instead of reopening leftover state
+from a tool you have since moved away from.
+
+## What "active" means
 A session is reported as active only when a Copilot process is genuinely still
 running. Copilot marks a live session with an `inuse.<pid>.lock` file, but
 those files survive a crash or a hard kill, and Windows hands the same process

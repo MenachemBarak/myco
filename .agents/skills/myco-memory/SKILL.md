@@ -114,6 +114,14 @@ breaking them.
   are the same command; the slug is for the reader and is never matched on.
 - **`session-state` contains things that are not sessions.** The CLI keeps
   `.session-operation-locks` there; dot-prefixed directories are skipped.
+- **Only sessions from the harness's interactive client are myco's.** A store
+  is shared with programs driving the same tool — 313 of 770 sessions in the
+  owner's Copilot home were never opened by anyone. Never list, number or
+  recover those. Keep it an allowlist.
+- **A session name may be a YAML block scalar.** Read the indented block, and
+  never scan it for metadata: a name can quote anything, including an `id:`.
+- **A harness myco cannot read yet says so**, and `recover` skips it. Never
+  fall back to reading `.copilot` for a folder that belongs to another tool.
 - **`forget` and `prune` touch the registry only.** They must never delete a
   `.copilot` folder.
 - **An unreadable registry is set aside, never overwritten**, so a corrupt file
