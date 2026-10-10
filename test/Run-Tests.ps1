@@ -215,6 +215,42 @@ function Get-WtTabCount {
     return @(Get-WtArgs -Sandbox $Sandbox | Where-Object { $_ -eq 'new-tab' }).Count
 }
 
+function ConvertTo-ClaudeProjectName {
+    <#  Claude Code names a project folder after the working directory, with
+        every character that is not a letter, digit or dash replaced by a dash.
+        Confirmed against the real CLI: C:\...\myco_probe.dot-bcdb09 became
+        C--Users-User-AppData-Local-Temp-myco-probe-dot-bcdb09. #>
+    param([string]$Path)
+    return ($Path -replace '[^A-Za-z0-9-]', '-')
+}
+
+function New-FakeClaudeSession {
+    <#  Creates a Claude Code session transcript shaped like a real one: one
+        .jsonl named after the session id, inside the project folder for the
+        working directory it belongs to. #>
+    param(
+        $Sandbox,
+        [string]$SessionCwd,
+        [string]$SessionId,
+        [string]$Title,
+        [string]$LastPrompt = 'do the thing',
+        [datetime]$UpdatedAt
+    )
+    if (-not $SessionId) { $SessionId = [guid]::NewGuid().ToString() }
+    if (-not $Title) { $Title = 'cc-' + $SessionId.Substring(0, 8) }
+    $dir = Join-Path $Sandbox.UserProfile ('.claude\projects\' + (ConvertTo-ClaudeProjectName $SessionCwd))
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $lines = @(
+        (@{ type = 'custom-title'; customTitle = $Title; sessionId = $SessionId } | ConvertTo-Json -Compress),
+        (@{ type = 'last-prompt'; lastPrompt = $LastPrompt; sessionId = $SessionId } | ConvertTo-Json -Compress),
+        (@{ type = 'user'; cwd = $SessionCwd; sessionId = $SessionId } | ConvertTo-Json -Compress)
+    )
+    $file = Join-Path $dir ($SessionId + '.jsonl')
+    Set-Content -LiteralPath $file -Value ($lines -join "`n") -Encoding UTF8
+    if ($UpdatedAt) { (Get-Item -LiteralPath $file).LastWriteTime = $UpdatedAt }
+    return $SessionId
+}
+
 function New-Project {
     param($Sandbox, [string]$Name)
     $p = Join-Path $Sandbox.Projects $Name
@@ -1341,23 +1377,23 @@ Describe 'harnesses myco cannot list yet' {
     It 'says so, instead of claiming the folder has no sessions' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('opencode', 'start', 'work')
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
-        Assert-Match $r.Output '(?i)claude' 'the listing must name the harness it cannot read'
+        Assert-Match $r.Output '(?i)opencode' 'the listing must name the harness it cannot read'
         Assert-NoMatch $r.Output 'no sessions yet' 'claiming there are none would be untrue'
     }
 
     It 'recover skips such a workspace and says how many' {
         $sb = New-Sandbox
         $proj = New-Project -Sandbox $sb -Name 'alpha'
-        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('opencode', 'start', 'work')
         $ch = Join-Path $proj '.copilot'
-        # Copilot state left over from before the folder moved to claude. It
-        # must not be reopened: that work is not where this folder's work is.
+        # Copilot state left over from before the folder moved harness. It must
+        # not be reopened: that work is not where this folder's work is.
         $null = New-FakeSession -CopilotHome $ch -Name 'Old copilot work' -UpdatedAt (Get-Date).AddMinutes(-5)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
-        Assert-NoMatch $r.Output 'Old copilot work' 'a claude folder must not have copilot sessions reopened'
-        Assert-Match $r.Output '(?i)claude' 'recover must say which harness it skipped'
+        Assert-NoMatch $r.Output 'Old copilot work' 'an opencode folder must not have copilot sessions reopened'
+        Assert-Match $r.Output '(?i)opencode' 'recover must say which harness it skipped'
     }
 
     It 'still recovers the copilot folders alongside it' {
@@ -1414,6 +1450,121 @@ Describe 'the harness in the table' {
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 437
         Assert-Match $r.Output 'HARNESS' 'the column must survive the ascii fallback'
         Assert-NoMatch $r.Output '\?' 'nothing unrenderable may be emitted'
+    }
+}
+
+Describe 'claude sessions' {
+
+    It 'mints the session id, because claude discards --name' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'fix-login')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Match $call.CliArgs '--session-id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' `
+            'claude must be given the session id myco minted'
+        Assert-NoMatch $call.CliArgs '--name' 'claude drops --name, so myco must not rely on it'
+    }
+
+    It 'lists a claude session myco started, under the name it was given' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'fix-login')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        $uuid = ''
+        for ($i = 0; $i -lt $call.ArgList.Count; $i++) {
+            if ($call.ArgList[$i] -eq '--session-id') { $uuid = $call.ArgList[$i + 1] }
+        }
+        # The real CLI writes the transcript once it runs; the stub cannot.
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -SessionId $uuid -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'fix-login-001001' 'the claude session must carry the id myco gave it'
+    }
+
+    It 'lists a claude session myco did not start' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'continue')
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -LastPrompt 'refactor the parser' `
+            -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'refactor the parser' 'a session claude named itself must still be listed, by its prompt'
+        Assert-Match $r.Output '001001' 'and must take a positional id'
+    }
+
+    It 'prefers a real title over claude''s generated one' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'continue')
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -Title 'Rewrite the billing module' `
+            -LastPrompt 'ignore me' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'Rewrite the billing module' 'a user-set title wins'
+        Assert-NoMatch $r.Output 'ignore me' 'the prompt is only a fallback'
+    }
+
+    It 'resumes a claude session by its myco id' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'fix-login')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        $uuid = ''
+        for ($i = 0; $i -lt $call.ArgList.Count; $i++) {
+            if ($call.ArgList[$i] -eq '--session-id') { $uuid = $call.ArgList[$i + 1] }
+        }
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -SessionId $uuid -UpdatedAt (Get-Date)
+        Clear-CopilotCalls -Sandbox $sb
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $sb.Projects -MycoArgs @('resume', 'fix-login-001001')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        Assert-Match $call.CliArgs ([regex]::Escape($uuid)) 'the claude session uuid must be resumed'
+        Assert-Equal $proj $r.FinalCwd 'the shell must be left in the workspace'
+    }
+
+    It 'keeps a claude id stable when a newer session appears' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'older')
+        $call = Get-LastHarnessCall -Sandbox $sb -Tool 'claude'
+        $uuid = ''
+        for ($i = 0; $i -lt $call.ArgList.Count; $i++) {
+            if ($call.ArgList[$i] -eq '--session-id') { $uuid = $call.ArgList[$i + 1] }
+        }
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -SessionId $uuid -UpdatedAt (Get-Date).AddDays(-2)
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -LastPrompt 'something newer' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'older-001001' 'the session myco named keeps its id however the list reorders'
+        Assert-NoMatch $r.Output 'older-001002' 'its id must not follow its position'
+    }
+
+    It 'shows claude in the harness column' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'continue')
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -LastPrompt 'some claude work' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        $row = @(Get-TableRow -Text $r.Output | Where-Object { $_ -match 'some claude work' })
+        Assert-Equal 1 $row.Count 'the claude session must be listed'
+        Assert-Match $row[0] 'claude' 'and the row must say it is claude'
+    }
+
+    It 'does not mistake another folder''s claude sessions for this one''s' {
+        $sb = New-Sandbox
+        $a = New-Project -Sandbox $sb -Name 'alpha'
+        $b = New-Project -Sandbox $sb -Name 'beta'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('claude', 'continue')
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $b -LastPrompt 'beta work only' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('sessions')
+        Assert-NoMatch $r.Output 'beta work only' 'claude keys sessions by directory, and so must myco'
+    }
+
+    It 'recovers a claude session instead of skipping it' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'continue')
+        $null = New-FakeClaudeSession -Sandbox $sb -SessionCwd $proj -LastPrompt 'claude work to recover' `
+            -UpdatedAt (Get-Date).AddMinutes(-5)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('recover', '--dry-run')
+        Assert-Match $r.Output 'claude work to recover' 'claude sessions must now be recoverable'
+        Assert-NoMatch $r.Output '(?i)cannot list those sessions yet' 'claude is no longer unreadable'
     }
 }
 
