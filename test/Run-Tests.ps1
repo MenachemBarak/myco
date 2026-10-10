@@ -1570,6 +1570,54 @@ Describe 'claude sessions' {
     }
 }
 
+Describe 'harness colours' {
+
+    It 'gives copilot blue and claude orange' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        Assert-Equal 'Blue' (Get-MycoHarness 'copilot').Colour 'copilot lines are blue'
+        Assert-Equal 'DarkYellow' (Get-MycoHarness 'claude').Colour `
+            'claude lines are orange, which is DarkYellow on a console'
+    }
+
+    It 'gives every harness a colour the console can actually render' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        $valid = [enum]::GetNames([System.ConsoleColor])
+        foreach ($name in (Get-MycoHarnessNames)) {
+            $colour = (Get-MycoHarness $name).Colour
+            Assert-True ($valid -contains $colour) `
+            ($name + ' must use a real ConsoleColor, got "' + $colour + '"')
+        }
+    }
+
+    It 'tells the harnesses apart' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        $colours = @((Get-MycoHarnessNames) | ForEach-Object { (Get-MycoHarness $_).Colour })
+        $distinct = @($colours | Sort-Object -Unique)
+        Assert-Equal $colours.Count $distinct.Count `
+        ('each harness needs its own colour, got: ' + ($colours -join ', '))
+    }
+
+    It 'still marks a running session green, whichever harness it is' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        $live = [pscustomobject]@{ Active = $true }
+        $idle = [pscustomobject]@{ Active = $false }
+        Assert-Equal 'Green' (Get-MycoSessionColour -Session $live -Harness (Get-MycoHarness 'claude')) `
+            'a running session stays green: it is the one thing you must not miss'
+        Assert-Equal 'DarkYellow' (Get-MycoSessionColour -Session $idle -Harness (Get-MycoHarness 'claude')) `
+            'an idle claude session takes the harness colour'
+    }
+
+    It 'never asks for a colour when NO_COLOR is set' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Some work' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'Some work' 'the table must still render in full'
+    }
+}
+
 Describe 'myco sessions presentation' {
 
     It 'renders sessions as an aligned table' {
