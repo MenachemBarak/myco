@@ -477,6 +477,11 @@ function Invoke-Myco {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
     }
     $previousErrorAction = $ErrorActionPreference
+    # chcp inside a cmd driver changes the code page of the shared console, not
+    # just that process, so it would silently follow every later test. The
+    # console encoding is captured here and put back below.
+    $previousConsoleEncoding = $null
+    try { $previousConsoleEncoding = [Console]::OutputEncoding } catch { }
     try {
         # myco reports problems on stderr; with 'Stop' those lines would be
         # rethrown here instead of being captured for assertions.
@@ -500,6 +505,9 @@ function Invoke-Myco {
         $ErrorActionPreference = $previousErrorAction
         foreach ($k in @($saved.Keys)) {
             [Environment]::SetEnvironmentVariable($k, $saved[$k])
+        }
+        if ($previousConsoleEncoding) {
+            try { [Console]::OutputEncoding = $previousConsoleEncoding } catch { }
         }
     }
 
