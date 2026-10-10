@@ -1618,6 +1618,64 @@ Describe 'harness colours' {
     }
 }
 
+Describe 'reading without getting in the way' {
+
+    It 'leaves no handle on a transcript it has read' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        $file = Join-Path $env:TEMP ('myco-handle-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.jsonl')
+        $lines = @('{"type":"custom-title","customTitle":"cc-abc12345"}')
+        1..600 | ForEach-Object { $lines += ('{"type":"user","n":' + $_ + '}') }
+        Set-Content -LiteralPath $file -Value ($lines -join "`n") -Encoding UTF8
+        try {
+            $null = Read-MycoClaudeLabel -Path $file
+            # No GC first, on purpose: a handle that only a collection would
+            # release is still a handle the harness trips over.
+            $free = $false
+            try {
+                $fs = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
+                $fs.Close()
+                $free = $true
+            } catch { }
+            Assert-True $free ('a transcript myco read is still locked. myco runs in the user''s own ' +
+                'long-lived shell, so a leaked handle stops claude compacting its own session.')
+        } finally {
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'reads a transcript the harness currently has open for writing' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        $file = Join-Path $env:TEMP ('myco-busy-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.jsonl')
+        Set-Content -LiteralPath $file -Value '{"type":"last-prompt","lastPrompt":"still writing"}' -Encoding UTF8
+        $held = $null
+        try {
+            # Claude holds its transcript open while the session runs.
+            $held = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'ReadWrite')
+            $label = Read-MycoClaudeLabel -Path $file
+            Assert-Equal 'still writing' $label 'a live session must still be listed, not skipped'
+        } finally {
+            if ($held) { $held.Close() }
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'lets the harness delete or rename a transcript myco is reading' {
+        . (Join-Path $script:RepoRoot 'lib\myco-core.ps1')
+        $file = Join-Path $env:TEMP ('myco-del-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.jsonl')
+        Set-Content -LiteralPath $file -Value '{"type":"last-prompt","lastPrompt":"compact me"}' -Encoding UTF8
+        try {
+            $null = Read-MycoClaudeLabel -Path $file
+            $moved = $file + '.moved'
+            $ok = $false
+            try { Move-Item -LiteralPath $file -Destination $moved -ErrorAction Stop; $ok = $true } catch { }
+            Assert-True $ok 'compaction renames the transcript, so myco must never stand in the way'
+            Remove-Item -LiteralPath $moved -Force -ErrorAction SilentlyContinue
+        } finally {
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'myco sessions presentation' {
 
     It 'renders sessions as an aligned table' {
