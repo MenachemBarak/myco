@@ -26,7 +26,7 @@ function Get-MycoLauncherPath {
     return (Join-Path (Split-Path -Parent $script:MycoLibRoot) 'bin\myco.ps1')
 }
 
-function Get-MycoVersion { '2.3.0' }
+function Get-MycoVersion { '2.4.0' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }
@@ -463,6 +463,7 @@ function Get-MycoHarness {
                 ListsSessions = $true
                 NewIdArg     = ''
                 Reader       = 'copilot'
+                Colour       = 'Blue'
             }
         }
         'claude' {
@@ -487,6 +488,7 @@ function Get-MycoHarness {
                 Client       = ''
                 ListsSessions = $true
                 Reader       = 'claude'
+                Colour       = 'DarkYellow'
             }
         }
         'opencode' {
@@ -509,6 +511,7 @@ function Get-MycoHarness {
                 ListsSessions = $false
                 NewIdArg     = ''
                 Reader       = ''
+                Colour       = 'Magenta'
             }
         }
         'pi' {
@@ -529,10 +532,23 @@ function Get-MycoHarness {
                 ListsSessions = $false
                 NewIdArg     = ''
                 Reader       = ''
+                Colour       = 'Cyan'
             }
         }
     }
     return $null
+}
+
+function Get-MycoSessionColour {
+    <#  The colour a session row is drawn in: its harness's, so two harnesses
+        in one listing are told apart at a glance, except while it is running.
+        Liveness wins because it is rare and the one thing a reader must not
+        miss; colouring it by harness as well would make the two signals
+        compete. #>
+    param($Session, $Harness)
+    if ($Session.Active) { return 'Green' }
+    if ($Harness -and $Harness.Colour) { return $Harness.Colour }
+    return ''
 }
 
 function Get-MycoHarnessHome {
@@ -1520,6 +1536,9 @@ function Show-MycoWorkspaceTable {
     if ($idWidth -gt 32) { $idWidth = 32 }
     $harnessName = [string]$Workspace.harness
     if (-not $harnessName) { $harnessName = Get-MycoDefaultHarness }
+    $harness = Get-MycoHarness $harnessName
+    $harnessColour = 'Cyan'
+    if ($harness -and $harness.Colour) { $harnessColour = $harness.Colour }
     $harnessWidth = 7
     if ($harnessName.Length -gt $harnessWidth) { $harnessWidth = $harnessName.Length }
     $statusWidth = 8
@@ -1538,7 +1557,7 @@ function Show-MycoWorkspaceTable {
         $titleText = $titleText.Substring(0, $innerWidth)
     }
     $fill = [string]$Glyphs.Horizontal * ($innerWidth - $titleText.Length)
-    Write-MycoLine ([string]$Glyphs.TopLeft + $titleText + $fill + [string]$Glyphs.TopRight) 'Cyan'
+    Write-MycoLine ([string]$Glyphs.TopLeft + $titleText + $fill + [string]$Glyphs.TopRight) $harnessColour
 
     Write-MycoLine ([string]$Glyphs.Vertical + ' ' + (Format-MycoCell $Workspace.path ($innerWidth - 2) $Glyphs.Ellipsis) +
         ' ' + [string]$Glyphs.Vertical) 'DarkGray'
@@ -1573,9 +1592,7 @@ function Show-MycoWorkspaceTable {
         ' ' + [string]$Glyphs.Vertical + ' ' + (Format-MycoCell $name $nameWidth $Glyphs.Ellipsis) +
         ' ' + [string]$Glyphs.Vertical
 
-        $colour = ''
-        if ($session.Active) { $colour = 'Green' }
-        Write-MycoLine $row $colour
+        Write-MycoLine $row (Get-MycoSessionColour -Session $session -Harness $harness)
     }
 
     Write-MycoTableRule -Glyphs $Glyphs -Widths $widths `
@@ -1588,12 +1605,15 @@ function Show-MycoWorkspaceNote {
     $innerWidth = $Width - 2
     $harnessName = [string]$Workspace.harness
     if (-not $harnessName) { $harnessName = Get-MycoDefaultHarness }
+    $harness = Get-MycoHarness $harnessName
+    $frameColour = 'Cyan'
+    if ($harness -and $harness.Colour) { $frameColour = $harness.Colour }
     $title = '[' + $Workspace.id + '] ' + (Split-Path -Leaf $Workspace.path) +
     ' (' + $harnessName + ', ' + $Workspace.origin + ')'
     $titleText = ([string]$Glyphs.Horizontal) + ' ' + $title + ' '
     if ($titleText.Length -gt $innerWidth) { $titleText = $titleText.Substring(0, $innerWidth) }
     $fill = [string]$Glyphs.Horizontal * ($innerWidth - $titleText.Length)
-    Write-MycoLine ([string]$Glyphs.TopLeft + $titleText + $fill + [string]$Glyphs.TopRight) 'Cyan'
+    Write-MycoLine ([string]$Glyphs.TopLeft + $titleText + $fill + [string]$Glyphs.TopRight) $frameColour
     Write-MycoLine ([string]$Glyphs.Vertical + ' ' + (Format-MycoCell $Workspace.path ($innerWidth - 2) $Glyphs.Ellipsis) +
         ' ' + [string]$Glyphs.Vertical) 'DarkGray'
     Write-MycoLine ([string]$Glyphs.Vertical + ' ' + (Format-MycoCell $Note ($innerWidth - 2) $Glyphs.Ellipsis) +

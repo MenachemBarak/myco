@@ -386,6 +386,25 @@ and truncates with an ellipsis.
 
 ---
 
+### 7.5 A row is coloured by its harness, except while it is running
+
+Each harness carries a `Colour` on its provider — copilot blue, claude orange
+(`DarkYellow`), opencode magenta, pi cyan — used for its workspace frame and
+its session rows. A running session is green regardless.
+
+**Why liveness wins.** It is rare and urgent; the harness is neither. Two
+signals in one channel compete, so the scarcer one takes it.
+
+**Why the colours must be distinct.** The whole purpose is telling harnesses
+apart in a mixed listing, so a test asserts they differ, and asserts each is a
+real `ConsoleColor` — an invalid name would not fail quietly, it would throw
+from `Write-Host` halfway through drawing a table.
+
+**Why this is tested in-process.** Colour is set through the console API and
+leaves no trace in captured output, so there is nothing to observe end to end.
+These are the only in-process tests in the suite, and the exception is
+deliberate rather than a loosening of 8.1.
+
 ## 8. Testing
 
 ### 8.1 End to end through real shells

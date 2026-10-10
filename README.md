@@ -39,6 +39,11 @@ the work already lives in whichever tool you began it in.
   ● active = a Copilot process is running.  Resume with: myco resume <id>
 ```
 
+Each harness has its own colour, so a listing that mixes them is readable at a
+glance: **copilot blue**, **claude orange**, opencode magenta, pi cyan. A
+running session stays green whatever its harness — it is the one row you must
+not miss. Set `NO_COLOR` to turn all of it off.
+
 ```console
 > myco start "split billing"
 myco [001] checkout-service  split-billing-001002  (created)
