@@ -1222,11 +1222,15 @@ Describe 'multi-line session names' {
         $proj = New-Project -Sandbox $sb -Name 'alpha'
         $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
         $ch = Join-Path $proj '.copilot'
+        # If the blank line ended the block, the indented lines after it would
+        # be read as metadata and this session would be dated 1999 - which is
+        # observable, where the name text itself is not.
         $null = New-FakeSession -CopilotHome $ch -NameStyle block -UpdatedAt (Get-Date) `
-            -Name "Context header`n`nuser_named: true`nsummary_count: 99"
+            -Name "Context header`n`nupdated_at: 1999-01-01T00:00:00.000Z"
+        $null = New-FakeSession -CopilotHome $ch -Name 'Plain older session' -UpdatedAt (Get-Date).AddHours(-2)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
-        Assert-Match $r.Output 'Context header' 'the name must still be read'
-        Assert-NoMatch $r.Output 'summary_count' 'nothing after a blank line inside the name is metadata'
+        Assert-Match $r.Output '001001[^\r\n]*Context header' 'the block name must still sort as recent'
+        Assert-Match $r.Output '001002[^\r\n]*Plain older session' 'the older session must follow it'
     }
 
     It 'still reads the metadata that follows a multi-line name' {
@@ -1358,6 +1362,50 @@ Describe 'harnesses myco cannot list yet' {
             -UpdatedAt (Get-Date).AddMinutes(-5)
         $r = Invoke-Myco -Sandbox $sb -WorkDir $a -MycoArgs @('recover', '--dry-run')
         Assert-Match $r.Output 'Real copilot work' 'the copilot workspace must still be recovered'
+    }
+}
+
+Describe 'the harness in the table' {
+
+    It 'heads a column for the harness' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Some work' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output 'HARNESS' 'the table must head a harness column'
+    }
+
+    It 'shows the harness on every session row' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue')
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Some work' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        $row = @(Get-TableRow -Text $r.Output | Where-Object { $_ -match 'Some work' })
+        Assert-Equal 1 $row.Count 'the session must be listed once'
+        Assert-Match $row[0] 'copilot' 'the row must say which harness the session belongs to'
+    }
+
+    It 'names the harness of a workspace it cannot list' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('claude', 'start', 'work')
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions')
+        Assert-Match $r.Output '(?i)claude' 'a workspace with no table must still name its harness'
+    }
+
+    It 'keeps the harness column on a legacy code page' {
+        $sb = New-Sandbox
+        $proj = New-Project -Sandbox $sb -Name 'alpha'
+        $null = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('continue') -Shell cmd
+        $ch = Join-Path $proj '.copilot'
+        $null = New-FakeSession -CopilotHome $ch -Name 'Some work' -UpdatedAt (Get-Date)
+        $r = Invoke-Myco -Sandbox $sb -WorkDir $proj -MycoArgs @('sessions') -Shell cmd -CodePage 437
+        Assert-Match $r.Output 'HARNESS' 'the column must survive the ascii fallback'
+        Assert-NoMatch $r.Output '\?' 'nothing unrenderable may be emitted'
     }
 }
 
