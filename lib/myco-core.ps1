@@ -26,7 +26,7 @@ function Get-MycoLauncherPath {
     return (Join-Path (Split-Path -Parent $script:MycoLibRoot) 'bin\myco.ps1')
 }
 
-function Get-MycoVersion { '2.2.0' }
+function Get-MycoVersion { '2.3.0' }
 function Get-MycoSchemaVersion { 1 }
 function Get-MycoDefaultSeed { 'full' }
 function Get-MycoDefaultMaxSessions { 15 }

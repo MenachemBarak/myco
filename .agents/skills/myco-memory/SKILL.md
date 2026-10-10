@@ -107,7 +107,9 @@ breaking them.
   renumber survivors, because users keep ids in their heads and in notes.
 - **Session ids are stable too, and the session carries its own.** `myco start`
   requires a name; it is slugified, joined to a number reserved in the registry
-  before Copilot launches, and passed to Copilot as `--name`. A number is never
+  before the harness launches, and either passed to the harness as a name or —
+  when the harness keeps no name, as claude does not — used alongside a session
+  id myco mints with `--session-id` and records itself. A number is never
   reused, even after its session is deleted. Do not reduce this back to a list
   position — an id inside a name that silently retargets is worse than no name.
 - **Only the digits address a session.** `split-billing-001002` and `001002`
@@ -122,6 +124,9 @@ breaking them.
   never scan it for metadata: a name can quote anything, including an `id:`.
 - **A harness myco cannot read yet says so**, and `recover` skips it. Never
   fall back to reading `.copilot` for a folder that belongs to another tool.
+  copilot and claude are readable; opencode and pi are not yet.
+- **Never trust `claude --name`.** It is accepted and discarded. claude's ids
+  are minted by myco with `--session-id` and recorded in the registry.
 - **`forget` and `prune` touch the registry only.** They must never delete a
   `.copilot` folder.
 - **An unreadable registry is set aside, never overwritten**, so a corrupt file

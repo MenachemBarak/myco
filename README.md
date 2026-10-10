@@ -91,12 +91,12 @@ your default with `myco config harness <name>`:
 Each tool is driven on its own terms — its own auto-approve flag, its own way
 of naming and resuming a session:
 
-| | auto-approve | names sessions | project isolation |
+| | auto-approve | session ids | project isolation |
 | --- | --- | --- | --- |
-| `copilot` | `--yolo` | yes | per-folder `COPILOT_HOME` |
-| `claude` | `--dangerously-skip-permissions` | yes | none needed |
-| `opencode` | `--auto` | **no** | none needed |
-| `pi` | `--approve` | yes | `--session-dir` in the project |
+| `copilot` | `--yolo` | named, `--name` | per-folder `COPILOT_HOME` |
+| `claude` | `--dangerously-skip-permissions` | minted, `--session-id` | none needed |
+| `opencode` | `--auto` | not listed yet | none needed |
+| `pi` | `--approve` | named, `--name` | `--session-dir` in the project |
 
 **Why the isolation column is uneven.** myco exists because the Copilot CLI
 pools every session into one global directory. claude and opencode already key
@@ -106,8 +106,13 @@ directory `XDG_DATA_HOME` moves, so isolating it would force you to log in
 again per project, or make myco copy your credentials into a folder inside your
 repository. It does neither.
 
-opencode is the only one of the four with no way to name a session, so myco
-does not invent a flag for it.
+**Why claude's ids are minted.** claude accepts `--name` and does not keep it —
+a session started with one comes back titled `cc-<hex>`. So myco generates the
+session id itself with `--session-id` and remembers the name, which gives the
+same stable `<name>-<id>` you get everywhere else.
+
+opencode can neither name a session nor be told an id, so its sessions are not
+listed yet; such a workspace says so rather than pretending it is empty.
 
 ## How it works
 

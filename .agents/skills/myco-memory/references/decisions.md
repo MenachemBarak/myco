@@ -202,6 +202,29 @@ slug is for the reader; it is never matched on.
 the same job — and a user who renames a session in Copilot would otherwise
 break an id they had written down.
 
+### 3.3b A harness that keeps no name gets a minted id
+
+claude accepts `--name` and discards it. A session started with
+`--name probe-name-001001` came back titled `cc-5c24c1c2`, and that string
+appears nowhere under `~/.claude`. myco therefore cannot hand claude an id and
+read it back the way it does with copilot.
+
+It mints one instead: `--session-id <uuid>` creates a session at exactly that
+id, confirmed against the real CLI. myco generates the uuid, records
+`{ n, id, slug }` on the workspace **before launching**, and matches sessions
+by that id afterwards.
+
+**Why record before launching.** A session that starts and then crashes still
+holds its number, and a number is never handed out twice. Recording afterwards
+would need the harness to report what it created, which it does not.
+
+**Why match on the id, not the name.** The harness may rename a session, or
+never keep the name at all. The id is the only thing both sides agree on.
+
+`NameArg` and `NewIdArg` on the provider say which strategy a harness needs.
+copilot and pi keep a name; claude is minted; opencode can do neither, which is
+why its sessions are not listed yet.
+
 ### 3.4 Atomic writes under a named mutex
 
 Written to a temp file then swapped in, guarded by `Local\myco-registry-v1`.
@@ -586,6 +609,30 @@ visible and reparable; the opposite error is neither.
 
 **Ids had to follow.** Were embedded sessions still numbered, the ids on screen
 would not be the ids `resume` and `recover` act on.
+
+### 10.1e Reading claude's sessions
+
+Claude keeps one `.jsonl` per session under
+`~/.claude/projects/<encoded cwd>`, where the folder name is the path with
+every character that is not a letter, digit or dash replaced by a dash —
+confirmed against the real CLI, which turned
+`C:\...\myco_probe.dot-bcdb09` into
+`C--Users-User-AppData-Local-Temp-myco-probe-dot-bcdb09`. Underscores and dots
+both become dashes, which is why the rule is an allowlist of characters rather
+than a list of separators to replace.
+
+**The label.** A transcript carries a `custom-title` record, but claude
+defaults it to `cc-<8 hex>`, which tells the reader nothing. In that case the
+first `last-prompt` record is used instead, which reads like the summaries
+copilot generates.
+
+**Only the head of the file is read.** These transcripts reach tens of
+megabytes — 46 MB in the owner's own store — and a listing must not pay for
+that. Labels are resolved only for the sessions actually shown.
+
+**Liveness is not detected.** claude leaves no lock file, so a claude session
+never shows as active. Reporting nothing is honest; guessing would break the
+rule that active means a process genuinely exists.
 
 ### 10.1d A harness myco cannot read says so
 

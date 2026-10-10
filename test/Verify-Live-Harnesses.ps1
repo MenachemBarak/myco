@@ -137,8 +137,30 @@ try {
         Check 'claude recorded it under this project directory' ($claudeDir.Count -ge 1) `
         ('new claude project folders: ' + (($claudeDir | ForEach-Object { $_.Name }) -join ', '))
         if ($claudeDir.Count -ge 1) {
-            $jsonl = @(Get-ChildItem -LiteralPath $claudeDir[0].FullName -File -ErrorAction SilentlyContinue)
+            $jsonl = @(Get-ChildItem -LiteralPath $claudeDir[0].FullName -Filter '*.jsonl' -File -ErrorAction SilentlyContinue)
             Check 'and wrote a session there' ($jsonl.Count -ge 1) $claudeDir[0].FullName
+
+            # The whole point of minting: the file is named after the id myco
+            # generated, so myco can find this session again.
+            $r = Invoke-MycoLive -WorkDir $proj -MycoArgs @('sessions')
+            Check 'myco lists that claude session under the name it was given' `
+            ($r.Output -match 'probe-two-\d{6}') $r.Output
+
+            $idCells = @()
+            foreach ($line in ($r.Output -split "`r?`n")) {
+                if ($line -match '^\s*[\u2502|]\s*(\S+)\s*[\u2502|]') { $idCells += $Matches[1] }
+            }
+            $mycoId = @($idCells | Where-Object { $_ -match '^probe-two-\d{6}$' })
+            Check 'the id column holds the full name-and-id' ($mycoId.Count -eq 1) ($idCells -join ', ')
+
+            if ($mycoId.Count -eq 1) {
+                $r = Invoke-MycoLive -WorkDir $root -MycoArgs @('resume', $mycoId[0], '-p', $reply)
+                Check 'resuming that claude session by its myco id succeeded' ($r.ExitCode -eq 0) $r.Output
+                $after = @(Get-ChildItem -LiteralPath $claudeDir[0].FullName -Filter '*.jsonl' -File)
+                Check 'it reused the session rather than forking a new one' `
+                ($after.Count -eq $jsonl.Count) `
+                (($after | ForEach-Object { $_.Name }) -join ', ')
+            }
         }
     } else {
         Write-Host "`nskipping the paid round trips" -ForegroundColor DarkGray
